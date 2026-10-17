@@ -157,6 +157,9 @@ raw_address
 - Центроиды улицы/жилмассива считаются на месте по индексу `idx_houses_street`
   и не требуют кэша. Поиск дублей улицы по `name_core_norm` кэшируется по
   `(city_id, ядро, полное имя)`.
+- Предрасчитанных центроидов в БД и в Git нет: агрегаты считаются из `houses`
+  по запросу и живут только в памяти процесса. После рестарта первый запрос
+  по городу/области снова считает `AVG(lat), AVG(lon)`.
 - SQLite синхронный, поэтому геокодер вызывается из HTTP-слоя через
   `run_in_threadpool`; ошибки БД/парсера не роняют сервис — возвращается `null`.
 
@@ -560,6 +563,61 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 Запас к лимиту ТЗ — **~208×**. Кэша готовых ответов по полной строке нет:
 каждый адрес разбирается конвейером, что соответствует античит-правилу ТЗ.
 
+### Где уходит время: профиль по этапам
+
+Для разбивки по этапам и замера масштабирования есть отдельный скрипт:
+
+```bash
+cd backend
+python3 scripts/parse_metrics.py \
+  --db data/address_base.db \
+  --input benchmarks/input_5000.json
+```
+
+Он пишет в `backend/benchmarks/`:
+
+| Файл | Что внутри |
+|---|---|
+| `parse_metrics.json` | машинные метрики: этапы, потоки, геокодинг |
+| `parse_metrics.md` | таблица для README/отчёта |
+| `parse_metrics.svg` / `.png` | график в стиле презентации |
+
+Пример на референсной машине (production-БД, прогретая, батч 2000):
+
+| Этап | мс/запись | Доля |
+|---|---:|---:|
+| Preprocess (WorkText, regex) | 0.02 | 1% |
+| Tail parser (дом/кв/подъезд/этаж) | 0.07 | 4% |
+| Классификация (город/район/обл.) | 0.07 | 4% |
+| SQLite FTS5 lookup (C, вне GIL) | 1.64 | **83%** |
+| Матчинг сущности + difflib | 0.10 | 5% |
+| Обогащение + confidence | 0.00 | 0% |
+| прочее | 0.07 | 4% |
+| **Итого** | **1.98** | **100%** |
+
+Многопоточность на том же батче: 1 поток — 3.83 c, 4 потока — 2.41 c
+(**+59%**). Отдельный замер геокодинга — 0.7 c на 1000 записей.
+
+### Большая пачка адресов для тестов
+
+`backend/benchmarks/input_5000.json` — 5000 записей (максимальный размер
+пакета `MAX_BATCH_SIZE`), совместим с `/api/v1/parse/batch` и загрузкой во
+фронтенде. Пересобрать детерминированно:
+
+```bash
+python3 scripts/make_bench_input.py --count 5000 --seed 2026
+```
+
+Проверка API на всей пачке:
+
+```bash
+curl -s -X POST http://localhost:8000/api/v1/parse/batch \
+  -H 'Content-Type: application/json' \
+  --data @backend/benchmarks/input_5000.json \
+  -o /tmp/parsed_5000.json \
+  -w 'HTTP %{http_code}, %{time_total} c\n'
+```
+
 ---
 
 ## Структура проекта
@@ -600,8 +658,13 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 │   │   └── README.md           # как устроена доставка БД
 │   ├── db/schema.sql           # эталонная схема v2
 │   ├── scripts/
-│   │   ├── bench.py            # замер производительности
+│   │   ├── bench.py            # общий бенчмарк parse/batch
+│   │   ├── parse_metrics.py    # метрики по этапам + SVG/PNG-график
+│   │   ├── make_bench_input.py # генератор input_5000.json
 │   │   └── make_demo_db.py     # демо-БД для тестов
+│   ├── benchmarks/
+│   │   ├── input_5000.json     # 5000 адресов для нагрузочных проверок
+│   │   └── parse_metrics.*     # сгенерированные метрики и график
 │   ├── sample_output.json      # пример ответа
 │   └── tests/                  # 87 pytest-тестов
 └── base-builder/

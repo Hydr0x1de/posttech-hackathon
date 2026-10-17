@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="2000" height="1050" viewBox="0 0 2000 1050">
+<rect width="100%" height="100%" fill="#0b0d10"/>
+<style>text{font-family:"DejaVu Sans","Arial",sans-serif;fill:#e8eaed}.muted{fill:#8f97a3}.label{font-size:23px}.bar-label{font-size:22px;font-weight:700}.tick{font-size:19px}.title{font-size:46px;font-weight:700}.subtitle{font-size:23px;fill:#8f97a3}.panel-title{font-size:28px;font-weight:600}</style>
+<text class="title" x="60" y="72">Jana Address — где уходит время на разбор одного адреса</text>
+<text class="subtitle" x="60" y="122">1 поток · прогретая БД · батч 2000 · всего 1.98 мс/запись | 83% — SQLite FTS5 (C) · 5% — Python-матчинг · 5% — regex</text>
+<line x1="610.0" y1="205" x2="610.0" y2="947" stroke="#252b33" stroke-width="1"/>
+<text class="tick muted" x="610.0" y="981" text-anchor="middle">0</text>
+<line x1="780.0" y1="205" x2="780.0" y2="947" stroke="#252b33" stroke-width="1"/>
+<text class="tick muted" x="780.0" y="981" text-anchor="middle">0.5</text>
+<line x1="950.0" y1="205" x2="950.0" y2="947" stroke="#252b33" stroke-width="1"/>
+<text class="tick muted" x="950.0" y="981" text-anchor="middle">1</text>
+<line x1="1120.0" y1="205" x2="1120.0" y2="947" stroke="#252b33" stroke-width="1"/>
+<text class="tick muted" x="1120.0" y="981" text-anchor="middle">1.5</text>
+<line x1="1290.0" y1="205" x2="1290.0" y2="947" stroke="#252b33" stroke-width="1"/>
+<text class="tick muted" x="1290.0" y="981" text-anchor="middle">2</text>
+<line x1="1460.0" y1="205" x2="1460.0" y2="947" stroke="#252b33" stroke-width="1"/>
+<text class="tick muted" x="1460.0" y="981" text-anchor="middle">2.5</text>
+<text class="tick muted" x="1035.0" y="1021" text-anchor="middle">накопленное время на одну запись, мс</text>
+<text class="label" x="60" y="243">1. Preprocess (WorkText, regex)</text>
+<rect x="610" y="214" width="6.9" height="42" fill="#7d8590" rx="1"/>
+<text class="bar-label" x="634.9" y="243">0.02 мс · 1%</text>
+<text class="label" x="60" y="331">2. Tail parser (дом/кв/подъезд/этаж)</text>
+<rect x="610" y="302" width="25.3" height="42" fill="#5ee27a" rx="1"/>
+<text class="bar-label" x="653.3" y="331">0.07 мс · 4%</text>
+<text class="label" x="60" y="419">3. Классификация (город/район/обл.)</text>
+<rect x="610" y="390" width="23.9" height="42" fill="#5ee27a" rx="1"/>
+<text class="bar-label" x="651.9" y="419">0.07 мс · 4%</text>
+<text class="label" x="60" y="507">4. SQLite FTS5 lookup ← C, вне GIL</text>
+<rect x="610" y="478" width="558.2" height="42" fill="#39b9e8" rx="1"/>
+<text class="bar-label" x="1186.2" y="507">1.64 мс · 83%</text>
+<text class="label" x="60" y="595">5. Матчинг сущности + difflib</text>
+<rect x="610" y="566" width="32.8" height="42" fill="#f4a33b" rx="1"/>
+<text class="bar-label" x="660.8" y="595">0.10 мс · 5%</text>
+<text class="label" x="60" y="683">6. Обогащение (родители, тип)</text>
+<rect x="610" y="654" width="2.0" height="42" fill="#9b8cff" rx="1"/>
+<text class="bar-label" x="630.0" y="683">0.00 мс · 0%</text>
+<text class="label" x="60" y="771">7. Confidence</text>
+<rect x="610" y="742" width="2.0" height="42" fill="#57d7c7" rx="1"/>
+<text class="bar-label" x="630.0" y="771">0.00 мс · 0%</text>
+<text class="label" x="60" y="859">прочее</text>
+<rect x="610" y="830" width="24.1" height="42" fill="#626b78" rx="1"/>
+<text class="bar-label" x="652.1" y="859">0.07 мс · 4%</text>
+<line x1="1283.7" y1="193" x2="1283.7" y2="947" stroke="#f2b84b" stroke-width="2" stroke-dasharray="7 6"/>
+<text class="bar-label" x="1275.7" y="180" text-anchor="end" fill="#f2b84b">итого 1.98 мс</text>
+<text class="panel-title" x="1600" y="185">Многопоточность (GIL)</text>
+<text class="bar-label" x="1600" y="240" fill="#f2b84b">+59% от 4 потоков</text>
+<rect x="1645" y="331.5" width="95" height="543.5" fill="#aeb6c2" rx="3"/>
+<text class="bar-label" x="1692.0" y="313.5" text-anchor="middle">3.83 c</text>
+<text class="label muted" x="1692.0" y="913" text-anchor="middle">1 поток</text>
+<rect x="1795" y="533.5" width="95" height="341.5" fill="#39b9e8" rx="3"/>
+<text class="bar-label" x="1842.0" y="515.5" text-anchor="middle">2.41 c</text>
+<text class="label muted" x="1842.0" y="913" text-anchor="middle">4 потока</text>
+<line x1="1600" y1="875" x2="1950" y2="875" stroke="#353b45" stroke-width="1"/>
+<text class="tick muted" x="1950" y="1016" text-anchor="end">геокодинг: 0.7 c / 1000 · 0.7 мс/запись</text>
+<text class="tick muted" x="60" y="1016">backend/scripts/parse_metrics.py · 2026-10-17T22:37:15+00:00</text>
+</svg>

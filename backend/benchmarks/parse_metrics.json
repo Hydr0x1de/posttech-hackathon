@@ -1,0 +1,97 @@
+{
+  "generated_at": "2026-10-17T22:37:15+00:00",
+  "db": "data/address_base.db (fts=True)",
+  "input": "benchmarks/input_5000.json",
+  "input_records": 5000,
+  "count": 2000,
+  "thread_count": 2000,
+  "warmup": 200,
+  "total_ms_per_record": 1.9813646775046438,
+  "stages": [
+    {
+      "key": "preprocess",
+      "label": "1. Preprocess (WorkText, regex)",
+      "color": "#7d8590",
+      "ms_per_record": 0.02024086951269055,
+      "percent": 1.0215620447106266
+    },
+    {
+      "key": "tail",
+      "label": "2. Tail parser (дом/кв/подъезд/этаж)",
+      "color": "#5ee27a",
+      "ms_per_record": 0.0744983959784804,
+      "percent": 3.7599537745017555
+    },
+    {
+      "key": "classify",
+      "label": "3. Классификация (город/район/обл.)",
+      "color": "#5ee27a",
+      "ms_per_record": 0.07027727899594538,
+      "percent": 3.5469128825115375
+    },
+    {
+      "key": "lookup",
+      "label": "4. SQLite FTS5 lookup ← C, вне GIL",
+      "color": "#39b9e8",
+      "ms_per_record": 1.6418178840176552,
+      "percent": 82.86298341027164
+    },
+    {
+      "key": "match",
+      "label": "5. Матчинг сущности + difflib",
+      "color": "#f4a33b",
+      "ms_per_record": 0.09643342450226555,
+      "percent": 4.867020473167768
+    },
+    {
+      "key": "enrich",
+      "label": "6. Обогащение (родители, тип)",
+      "color": "#9b8cff",
+      "ms_per_record": 0.0026829354756046087,
+      "percent": 0.13540846397764253
+    },
+    {
+      "key": "confidence",
+      "label": "7. Confidence",
+      "color": "#57d7c7",
+      "ms_per_record": 0.004640914509764116,
+      "percent": 0.2342281843647755
+    },
+    {
+      "key": "other",
+      "label": "прочее",
+      "color": "#626b78",
+      "ms_per_record": 0.07077297451223785,
+      "percent": 3.5719307664942455
+    }
+  ],
+  "threads": {
+    "1": {
+      "count": 2000,
+      "best_seconds": 3.833561070000542,
+      "median_seconds": 3.8769503769999574,
+      "ms_per_record": 1.916780535000271,
+      "runs_seconds": [
+        3.996900125999673,
+        3.833561070000542,
+        3.8769503769999574
+      ]
+    },
+    "4": {
+      "count": 2000,
+      "best_seconds": 2.409113934999368,
+      "median_seconds": 2.4212012749994756,
+      "ms_per_record": 1.204556967499684,
+      "runs_seconds": [
+        2.4605349729999944,
+        2.409113934999368,
+        2.4212012749994756
+      ]
+    }
+  },
+  "geocode": {
+    "count": 1000,
+    "seconds": 0.693112437000309,
+    "ms_per_record": 0.693112437000309
+  }
+}
