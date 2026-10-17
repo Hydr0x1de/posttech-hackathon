@@ -68,7 +68,8 @@ def test_batch_returns_array_in_order(client_with_db):
     assert first["district"] == "Ауэзовский"
     assert first["street_name"] == "Казыбек би"
     assert first["house"] == "12а"
-    assert data[1]["living_area"] == "12 микрорайон"
+    assert data[1]["street_name"] == "12"
+    assert data[1]["living_area"] is None
 
 
 def test_batch_accepts_items_wrapper(client_with_db):

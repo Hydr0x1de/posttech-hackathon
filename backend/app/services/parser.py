@@ -370,6 +370,80 @@ class _EntityMatch:
     score: float
 
 
+_CITY_CONTEXT_WORDS = frozenset(
+    {
+        "город",
+        "г",
+        "қаласы",
+        "каласы",
+        "облысы",
+        "область",
+        "ауданы",
+        "район",
+        "республикасы",
+        "республика",
+    }
+)
+
+
+def _city_context_spans(tokens: Sequence[Token]) -> set[tuple[int, int]]:
+    """Спаны соседних с городом/областью слов (для двуязычных склеек).
+
+    Пример: "Актобе/Ақтөбе қаласы" — «Ақтөбе» не должно стать улицей.
+    """
+    spans: set[tuple[int, int]] = set()
+    for index, token in enumerate(tokens):
+        if token.norm not in _CITY_CONTEXT_WORDS:
+            continue
+        if index > 0:
+            prev = tokens[index - 1]
+            spans.add((prev.start, prev.end))
+        if index + 1 < len(tokens):
+            nxt = tokens[index + 1]
+            spans.add((nxt.start, nxt.end))
+    return spans
+
+
+def _has_living_type_near(tokens: Sequence[Token], match: _EntityMatch) -> bool:
+    """Есть ли рядом с найденным названием слово «мкр/микрорайон/жк».
+
+    Нужно, чтобы не принять за жилмассив часть двуязычной склейки города
+    («Актобе/Ақтөбе қаласы»): у настоящего микрорайона тип стоит рядом.
+    """
+    before = [token for token in tokens if token.end <= match.start]
+    after = [token for token in tokens if token.start >= match.end]
+    inside = [
+        token
+        for token in tokens
+        if token.start >= match.start and token.end <= match.end
+    ]
+    around = inside + before[-1:] + after[:1]
+    return any(
+        vocab.canonical_street_type(token.raw) in LIVING_AREA_TYPES
+        for token in around
+    )
+
+
+def _slice_without_type(
+    work: WorkText, tokens: Sequence[Token], start: int, end: int
+) -> str:
+    """Слайс названия без базового слова типа.
+
+    Для микрорайона/квартала ТЗ требует `street_name` без типа:
+    "12 микрорайон" -> "12", "Аксай 3а" -> "Аксай 3а".
+    """
+    selected = [
+        token
+        for token in tokens
+        if token.start >= start
+        and token.end <= end
+        and vocab.canonical_street_type(token.raw) is None
+    ]
+    if not selected:
+        return work.original_slice(start, end)
+    return work.original_slice(selected[0].start, selected[-1].end)
+
+
 def _strip_type_tokens(value: str) -> str:
     """Убрать базовые слова типа из названия ("улица Абая" -> "абая").
 
@@ -829,6 +903,7 @@ class AddressParserService:
         ] or [token for _, token in phrase]
         name_span = (name_tokens[0].start, name_tokens[-1].end)
 
+        city_in_text = any(c.kind == "city" for c in classifications)
         match: _EntityMatch | None = None
         candidates: list[StreetEntity] = []
         ratio = 0.0
@@ -839,6 +914,49 @@ class AddressParserService:
         elif result.street_type is not None:
             preferred_type = "street"
 
+        has_living_type = any(
+            kind in LIVING_AREA_TYPES for kind in type_positions.values()
+        )
+        has_street_type = any(
+            kind not in LIVING_AREA_TYPES for kind in type_positions.values()
+        )
+
+        # "Мкр/ЖК + отдельная улица": ищем обе сущности независимо.
+        # Город должен быть в строке, иначе не обогащаем гео-поля.
+        if city_in_text and query_tokens and has_living_type and has_street_type:
+            living_match, _, _ = self._lookup_streets(
+                repository,
+                query_tokens,
+                name_tokens,
+                classifications,
+                "living_area",
+            )
+            if (
+                living_match is not None
+                and living_match.entity.entity_type == "living_area"
+                and _has_living_type_near(tokens, living_match)
+            ):
+                street_match = self._find_separate_entity(
+                    repository, phrase, living_match, classifications, "street", tokens
+                )
+                if street_match is not None:
+                    self._apply_entity(
+                        result,
+                        street_match.entity,
+                        index,
+                        work.original_slice(street_match.start, street_match.end),
+                        trusted=True,
+                    )
+                    result.living_area = _slice_without_type(
+                        work, tokens, living_match.start, living_match.end
+                    )
+                    result.matched = True
+                    self._fill_province_from_city(result, index)
+                    result.confidence = self._confidence(
+                        repository, result, street_match.score
+                    )
+                    return result
+
         if query_tokens:
             match, level, candidates = self._lookup_streets(
                 repository, query_tokens, name_tokens, classifications, preferred_type
@@ -846,7 +964,6 @@ class AddressParserService:
             if match is not None:
                 ratio = match.score
 
-        city_in_text = any(c.kind == "city" for c in classifications)
         explicit_geo = bool(result.province or result.city or result.district)
         ambiguous = False
         weak = False
@@ -875,10 +992,79 @@ class AddressParserService:
                 work.original_slice(match.start, match.end),
                 trusted=trust_parents,
             )
+            if match.entity.entity_type == "street" and has_living_type:
+                living_match = self._find_separate_entity(
+                    repository, phrase, match, classifications, "living_area", tokens
+                )
+                if living_match is not None:
+                    result.living_area = _slice_without_type(
+                        work, tokens, living_match.start, living_match.end
+                    )
+
+            if match.entity.entity_type == "living_area":
+                # Микрорайон/квартал как основной адресный элемент — это
+                # street_name по ТЗ ("Мкр Аксай 3а" -> street_name "Аксай 3а",
+                # living_area null). living_area заполняется только если
+                # отдельно указана ещё и улица.
+                living_slice = _slice_without_type(
+                    work, tokens, match.start, match.end
+                )
+                street_match = (
+                    self._find_separate_entity(
+                        repository,
+                        phrase,
+                        match,
+                        classifications,
+                        "street",
+                        tokens,
+                    )
+                    if has_street_type
+                    else None
+                )
+                if street_match is not None:
+                    result.living_area = living_slice
+                    result.street_name = work.original_slice(
+                        street_match.start, street_match.end
+                    )
+                    result.street_id = street_match.entity.id
+                    result.street_entity_type = street_match.entity.entity_type
+                    db_type = (
+                        vocab.canonical_street_type(street_match.entity.street_type)
+                        or street_match.entity.street_type
+                    )
+                    if db_type:
+                        result.street_type = db_type
+                    if result.city is None and street_match.entity.city_id is not None:
+                        city = index.city_by_id.get(street_match.entity.city_id)
+                        if city is not None:
+                            result.city = city.name
+                            result.city_id = city.id
+                    if (
+                        result.district is None
+                        and street_match.entity.district_id is not None
+                    ):
+                        district = index.district_by_id.get(
+                            street_match.entity.district_id
+                        )
+                        if district is not None:
+                            result.district = district.name
+                            result.district_id = district.id
+                else:
+                    result.street_name = living_slice
+                    result.living_area = None
+                    db_type = (
+                        vocab.canonical_street_type(match.entity.street_type)
+                        or match.entity.street_type
+                    )
+                    if db_type and trust_parents:
+                        result.street_type = db_type
         else:
             name_slice = work.original_slice(*name_span)
             if result.street_type in LIVING_AREA_TYPES:
-                result.living_area = name_slice
+                result.street_name = _slice_without_type(
+                    work, tokens, *name_span
+                )
+                result.living_area = None
             else:
                 result.street_name = name_slice
 
@@ -889,6 +1075,51 @@ class AddressParserService:
         self._fill_province_from_city(result, index)
         result.confidence = self._confidence(repository, result, ratio, weak=weak)
         return result
+
+    @staticmethod
+    def _find_separate_entity(
+        repository: AddressRepository | NullAddressRepository,
+        phrase: Sequence[tuple[int, Token]],
+        primary_match: _EntityMatch,
+        classifications: Sequence[_Classification],
+        entity_type: str,
+        tokens: Sequence[Token],
+    ) -> _EntityMatch | None:
+        """Найти вторую сущность, указанную отдельно от основной.
+
+        Пример: "Мкр Аксай 3а, улица Абая 12" — living_area Аксай 3а,
+        street_name Абая.
+        """
+        remaining = [
+            (position, token)
+            for position, token in phrase
+            if not (
+                token.start < primary_match.end
+                and primary_match.start < token.end
+            )
+        ]
+        city_spans = _city_context_spans(tokens)
+        name_tokens = [
+            token
+            for _, token in remaining
+            if vocab.canonical_street_type(token.raw) is None
+            and (token.start, token.end) not in city_spans
+        ]
+        if not name_tokens or not any(
+            any(ch.isalpha() for ch in token.norm) for token in name_tokens
+        ):
+            return None
+        query_tokens = [token.norm for token in name_tokens]
+        match, _, _ = AddressParserService._lookup_streets(
+            repository,
+            query_tokens,
+            name_tokens,
+            classifications,
+            preferred_type=entity_type,
+        )
+        if match is None or match.entity.entity_type != entity_type:
+            return None
+        return match
 
     @staticmethod
     def _lookup_streets(

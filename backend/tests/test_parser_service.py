@@ -64,12 +64,14 @@ def test_glued_writing(null_parser):
     assert result.entrance == "4"
     assert result.apartment == "191"
     assert result.street_type == "квартал"
-    assert result.living_area == "66квартал"
+    assert result.street_name == "66"
+    assert result.living_area is None
 
 
-def test_living_area_from_type(null_parser):
+def test_microdistrict_is_street_name_in_fallback(null_parser):
     result = null_parser.parse("rec_1", "12 микрорайон, дом 5")
-    assert result.living_area == "12 микрорайон"
+    assert result.street_name == "12"
+    assert result.living_area is None
     assert result.street_type == "микрорайон"
 
 
@@ -113,18 +115,39 @@ def test_db_alias_lookup_keeps_user_spelling(db_parser):
     assert result.street_type == "улица"
 
 
-def test_db_living_area(db_parser):
+def test_db_microdistrict_goes_to_street_name(db_parser):
     result = db_parser.parse("rec_1", "Актобе, 12 микрорайон, дом 5")
-    assert result.living_area == "12 микрорайон"
-    assert result.street_name is None
+    assert result.street_name == "12"
+    assert result.living_area is None
+    assert result.street_type == "микрорайон"
     assert result.city == "Актобе"
+
+
+def test_official_microdistrict_sample(db_parser):
+    raw = "город Алматы/Алматы қаласы, Мкр Аксай 3а, 59, кв 70"
+    result = db_parser.parse("rec_1", raw)
+    assert result.city == "Алматы"
+    assert result.street_type == "микрорайон"
+    assert result.street_name == "Аксай 3а"
+    assert result.living_area is None
+    assert result.house == "59"
+    assert result.apartment == "70"
+
+
+def test_microdistrict_plus_separate_street(db_parser):
+    result = db_parser.parse("rec_1", "Алматы, Мкр Орбита 1, улица Абая 12")
+    assert result.living_area == "Орбита 1"
+    assert result.street_name == "Абая"
+    assert result.street_type == "проспект"
+    assert result.house == "12"
 
 
 def test_bilingual_glue(db_parser):
     raw = "город Актобе/Ақтөбе қаласы, 12 микрорайон, дом 5, кв 3"
     result = db_parser.parse("rec_1", raw)
     assert result.city == "Актобе"
-    assert result.living_area == "12 микрорайон"
+    assert result.street_name == "12"
+    assert result.living_area is None
     assert result.raw_address == raw
 
 
@@ -208,11 +231,12 @@ def test_kazakh_name_kept_in_fallback(db_parser):
     assert result.city == "Астана"
 
 
-def test_slice_uses_full_official_name(truncated_parser):
-    """Куцый name_norm ("12") не должен обрезать слайс до "12"."""
+def test_microdistrict_slice_strips_type(truncated_parser):
+    """Микрорайон как основной адрес: тип срезан, имя в street_name."""
     result = truncated_parser.parse("rec_1", "12 микрорайон, дом 5")
-    assert result.living_area == "12 микрорайон"
-    assert result.street_name is None
+    assert result.street_name == "12"
+    assert result.living_area is None
+    assert result.street_type == "микрорайон"
     assert result.city == "Караганда"
 
 
@@ -222,7 +246,8 @@ def test_weak_similarity_goes_to_regex_fallback(truncated_parser):
     assert result.province is None
     assert result.city is None
     assert result.district is None
-    assert result.living_area == "66квартал"
+    assert result.street_name == "66"
+    assert result.living_area is None
     assert result.confidence == 0.5
 
 
