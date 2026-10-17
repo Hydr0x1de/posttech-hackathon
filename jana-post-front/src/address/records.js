@@ -110,9 +110,9 @@ export function mapQueries(record) {
   const localityMatch = tokens(locality);
   const streetMatch = name ? [...localityMatch, ...tokens(name)] : localityMatch;
   const candidates = [];
-  const add = (parts, exact, match) => {
+  const add = (parts, exact, match, extra) => {
     const q = [locality, parts.filter(Boolean).join(' ')].filter(Boolean).join(', ');
-    if (!candidates.some((c) => c.q === q)) candidates.push({ q, exact, match });
+    if (!candidates.some((c) => c.q === q)) candidates.push({ q, exact, match, ...extra });
   };
   if (name) {
     add([type, name, house], Boolean(house), streetMatch);
@@ -120,6 +120,20 @@ export function mapQueries(record) {
     add([name, house], Boolean(house), streetMatch);
     add([type, name], false, streetMatch);
     if (/\s/.test(name)) add([name.replace(/\s+/g, '-')], false, streetMatch);
+  }
+  // Мкр / ЖК: в OSM дома микрорайонов подписаны без улицы — «Аксай-4, 10»
+  const area = record.living_area;
+  if (area) {
+    const areaMatch = [...localityMatch, ...tokens(area)];
+    const dashed = area.replace(/\s+(?=\d)/g, '-');
+    // house — если текстом дом не найдётся, ищем его по номеру внутри границ микрорайона
+    const extra = !name && house ? { house } : undefined;
+    if (extra) {
+      if (dashed !== area) add([dashed, house], true, areaMatch, extra);
+      add([area, house], true, areaMatch, extra);
+    }
+    if (dashed !== area) add([dashed], false, areaMatch, extra);
+    add([area], false, areaMatch, extra);
   }
   if (record.district) add([`${record.district} район`], false, localityMatch);
   add([], false, localityMatch);

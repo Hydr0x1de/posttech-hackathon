@@ -33,7 +33,69 @@ export function createNominatimProvider({ language = 'ru', countryCodes = '' } =
       if (!data || data.error) return null;
       return normalizeNominatimItem(data);
     },
+
+    // Дом по номеру внутри границ найденного места: в OSM он бывает подписан
+    // другим микрорайоном («59, Аксай-3» стоит внутри «Аксай 3А»)
+    async findHouse(house, place, { signal } = {}) {
+      const box = place?.raw?.boundingbox?.map(Number);
+      if (!house || !box || box.some((n) => !Number.isFinite(n))) return null;
+      const [s, n, w, e] = box;
+      const padLat = Math.max((n - s) * 0.2, 0.002);
+      const padLng = Math.max((e - w) * 0.2, 0.002);
+      const bbox = [s - padLat, w - padLng, n + padLat, e + padLng].map((v) => v.toFixed(6)).join(',');
+      const number = house.trim().replace(/\s+/g, '').replace(/[.*+?^${}()|[\]\\"]/g, '\\$&');
+      const query = `[out:json][timeout:15];nwr["addr:housenumber"~"^${number}$",i](${bbox});out tags center 10;`;
+
+      const data = await overpass(query, signal);
+
+      const lat0 = parseFloat(place.raw.lat);
+      const lng0 = parseFloat(place.raw.lon);
+      const found = (data.elements || [])
+        .map((el) => ({ el, lat: el.lat ?? el.center?.lat, lng: el.lon ?? el.center?.lon }))
+        .filter((h) => Number.isFinite(h.lat) && Number.isFinite(h.lng))
+        .sort((a, b) => Math.hypot(a.lat - lat0, a.lng - lng0) - Math.hypot(b.lat - lat0, b.lng - lng0))[0];
+      if (!found) return null;
+
+      const tags = found.el.tags || {};
+      const street = tags['addr:street'] || tags['addr:place'] || '';
+      return {
+        id: `osm-${found.el.type}-${found.el.id}`,
+        label: [tags['addr:housenumber'], street, place.normalized?.city].filter(Boolean).join(', '),
+        name: tags.name || '',
+        lng: found.lng,
+        lat: found.lat,
+        normalized: {
+          ...place.normalized,
+          street,
+          house: tags['addr:housenumber'],
+          full: [street, tags['addr:housenumber']].filter(Boolean).join(', '),
+        },
+        raw: found.el,
+      };
+    },
   };
+}
+
+// Публичные серверы Overpass часто отвечают 429/502 — пробуем зеркала по очереди
+const OVERPASS_ENDPOINTS = [
+  'https://overpass-api.de/api/interpreter',
+  'https://overpass.kumi.systems/api/interpreter',
+  'https://overpass.private.coffee/api/interpreter',
+];
+
+async function overpass(query, signal) {
+  let lastError;
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    try {
+      const res = await fetch(endpoint, { method: 'POST', body: new URLSearchParams({ data: query }), signal });
+      if (res.ok) return await res.json();
+      lastError = new Error(`Overpass error: ${res.status}`);
+    } catch (err) {
+      if (err.name === 'AbortError') throw err;
+      lastError = err;
+    }
+  }
+  throw lastError;
 }
 
 function normalizeNominatimItem(item) {

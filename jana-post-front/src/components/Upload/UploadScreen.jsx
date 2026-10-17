@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { linesToRecords, parseInputFile } from '../../address/records';
-import { CheckIcon, DownloadIcon, FileIcon, UploadFileGlyph } from '../Icons';
+import { ArrowRightIcon, CheckIcon, DownloadIcon, FileIcon, MapPinIcon, UploadFileGlyph } from '../Icons';
 import Logo from '../Logo';
 import ThemeToggle from '../ThemeToggle';
 import { ClayCoin, ClayDoc, ClayPin } from './Clay';
@@ -17,6 +17,7 @@ export default function UploadScreen({ status, progress, error, theme, onToggleT
   const [dragging, setDragging] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [text, setText] = useState('');
+  const [address, setAddress] = useState('');
   const [localError, setLocalError] = useState(null);
 
   const parsing = status === 'parsing';
@@ -34,6 +35,14 @@ export default function UploadScreen({ status, progress, error, theme, onToggleT
 
   const handleText = () => {
     const records = linesToRecords(text);
+    if (records.length === 0) return;
+    setLocalError(null);
+    onRun(records, 'Ручной ввод');
+  };
+
+  const handleAddress = (e) => {
+    e.preventDefault();
+    const records = linesToRecords(address);
     if (records.length === 0) return;
     setLocalError(null);
     onRun(records, 'Ручной ввод');
@@ -84,6 +93,33 @@ export default function UploadScreen({ status, progress, error, theme, onToggleT
                 </div>
               </div>
             ) : (
+              <>
+              <form className="address-bar" onSubmit={handleAddress}>
+                <MapPinIcon className="address-bar__pin" size={22} strokeWidth={2.2} />
+                <input
+                  type="text"
+                  value={address}
+                  onChange={(e) => setAddress(e.target.value)}
+                  onPaste={(e) => {
+                    const pasted = e.clipboardData.getData('text');
+                    if (!pasted.includes('\n')) return;
+                    e.preventDefault();
+                    setText(address ? `${address}\n${pasted}` : pasted);
+                    setAddress('');
+                    setManualOpen(true);
+                  }}
+                  placeholder="Адрес, например Туран 55/6"
+                  aria-label="Адрес доставки"
+                />
+                <button type="submit" className="address-bar__go" disabled={!address.trim()} aria-label="Разобрать адрес">
+                  <ArrowRightIcon size={20} strokeWidth={2.2} />
+                </button>
+              </form>
+
+              <div className="divider" aria-hidden="true">
+                <span>или</span>
+              </div>
+
               <div
                 className={`dropzone${dragging ? ' dropzone--active' : ''}`}
                 role="button"
@@ -115,12 +151,7 @@ export default function UploadScreen({ status, progress, error, theme, onToggleT
                 </span>
                 <span className="btn btn--primary btn--lg dropzone__btn">Выбрать файл</span>
               </div>
-            )}
-
-            {!parsing && !manualOpen && (
-              <button type="button" className="tile__link" onClick={() => setManualOpen(true)}>
-                или вставьте адреса текстом
-              </button>
+              </>
             )}
 
             {shownError && (

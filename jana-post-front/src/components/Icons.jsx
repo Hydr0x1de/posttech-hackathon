@@ -35,6 +35,19 @@ export const DownloadIcon = (p) => (
   </Icon>
 );
 
+export const MapPinIcon = (p) => (
+  <Icon {...p}>
+    <path d="M12 21s-7-6.2-7-11.5a7 7 0 0 1 14 0C19 14.8 12 21 12 21Z" />
+    <circle cx="12" cy="9.5" r="2.5" />
+  </Icon>
+);
+
+export const ArrowRightIcon = (p) => (
+  <Icon {...p}>
+    <path d="M5 12h14m0 0-6-6m6 6-6 6" />
+  </Icon>
+);
+
 export const UploadFileGlyph = ({ size = 52 }) => (
   <svg width={size} height={size} viewBox="0 0 48 48" aria-hidden="true">
     <defs>

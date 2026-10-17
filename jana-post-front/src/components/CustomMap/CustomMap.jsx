@@ -249,15 +249,34 @@ export default function CustomMap({
 
     (async () => {
       try {
+        let approx = null;
         for (let i = 0; i < candidates.length; i += 1) {
           if (i > 0) await wait(1000);
           if (controller.signal.aborted) return;
           const results = await geocoder.search(candidates[i].q, { signal: controller.signal });
           if (requestId !== reverseIdRef.current) return;
-          const first = results.find((place) => fits(place, candidates[i].match));
+          const matching = results.filter((place) => fits(place, candidates[i].match));
+          let first = matching.find((place) => place.normalized?.house) || matching[0];
+          // Нашли место без дома — сначала доберём остальные точные варианты написания
+          if (candidates[i].exact && !first?.normalized?.house) {
+            if (first) approx ??= first;
+            if (candidates[i + 1]?.exact || !approx) continue;
+            first = approx;
+          }
           if (!first) continue;
 
-          const exact = candidates[i].exact && Boolean(first.normalized?.house);
+          let exact = candidates[i].exact && Boolean(first.normalized?.house);
+          if (!exact && candidates[i].house && geocoder.findHouse) {
+            const house = await geocoder.findHouse(candidates[i].house, first, { signal: controller.signal }).catch((err) => {
+              if (err.name === 'AbortError') throw err;
+              return null;
+            });
+            if (requestId !== reverseIdRef.current) return;
+            if (house) {
+              first = house;
+              exact = true;
+            }
+          }
           const zoom = exact ? 17 : i === candidates.length - 1 ? 12 : 15;
           pointRef.current = { lat: first.lat, lng: first.lng };
           viewRef.current = { center: [first.lat, first.lng], zoom };
