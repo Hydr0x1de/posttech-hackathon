@@ -1,60 +1,42 @@
 name: jana-address
 
+# Ready-to-run images with the address base baked in.
+# Pull and start:  docker compose up -d
+# Rebuild local images: docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 services:
   api:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    image: jana-address-api:1.0.0
+    image: ghcr.io/hydr0x1de/posttech-hackathon-api:1.0.0
     container_name: jana-address-api
     ports:
       - "8000:8000"
     environment:
       ADDRESS_DB_PATH: /data/address_base.db
-      # Used only on a clean clone when /data and the local seed are empty.
-      ADDRESS_DB_URL: https://github.com/Hydr0x1de/posttech-hackathon/releases/download/v1.0/address_base.db
-      ADDRESS_DB_FALLBACK_URL: https://posttech_db.hydr0x1de.xyz/address_base.db
-      ADDRESS_DB_SEED: /seed/address_base.db
-      # false: start in regex fallback if both sources are unreachable.
-      ADDRESS_DB_REQUIRED: "false"
       MAX_BATCH_SIZE: "5000"
       PARSER_WORKERS: "4"
-      PARSER_CACHE_SIZE: "200000"
       DB_RELOAD_INTERVAL: "5"
       LOG_LEVEL: INFO
-    volumes:
-      # Local DB (if present) is used as a read-only seed.
-      - ./backend/data:/seed:ro
-      # Writable named volume; the entrypoint copies the seed or downloads the DB.
-      - address_data:/data
     healthcheck:
-      # Healthy only when the API responds AND the address base is loaded.
+      # Baked-in DB must be loaded for the container to become healthy.
       test:
         - CMD
         - python
         - -c
         - |
-          import json, os, sys, urllib.request
+          import json, sys, urllib.request
           payload = json.load(
               urllib.request.urlopen("http://127.0.0.1:8000/api/v1/health", timeout=3)
           )
-          required = os.getenv("ADDRESS_DB_REQUIRED", "false").lower() == "true"
-          print(f"db_loaded={payload.get('db_loaded')} required={required}")
-          healthy = payload.get("status") == "ok" and (
-              payload.get("db_loaded") is True or not required
-          )
+          print(f"db_loaded={payload.get('db_loaded')}")
+          healthy = payload.get("status") == "ok" and payload.get("db_loaded") is True
           sys.exit(0 if healthy else 1)
       interval: 30s
       timeout: 5s
       retries: 5
-      start_period: 180s
+      start_period: 30s
     restart: unless-stopped
 
   web:
-    build:
-      context: ./jana-post-front
-      dockerfile: Dockerfile
-    image: jana-address-web:1.0.0
+    image: ghcr.io/hydr0x1de/posttech-hackathon-web:1.0.0
     container_name: jana-address-web
     ports:
       - "8080:80"
@@ -64,6 +46,3 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
-
-volumes:
-  address_data:

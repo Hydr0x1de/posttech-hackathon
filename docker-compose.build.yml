@@ -1,0 +1,16 @@
+name: jana-address
+
+# Maintainer-only override: build images locally instead of pulling from GHCR.
+# Requires backend/data/address_base.db (the DB is baked into the API image).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+  web:
+    build:
+      context: ./jana-post-front
+      dockerfile: Dockerfile

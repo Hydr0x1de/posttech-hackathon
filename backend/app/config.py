@@ -33,7 +33,6 @@ _DEFAULTS = {
     "db_path": "data/address_base.db",
     "max_batch_size": 5000,
     "workers": 4,
-    "cache_size": 200_000,
     "db_reload_interval": 5.0,
     "log_level": "INFO",
 }
@@ -50,8 +49,6 @@ class Settings:
     max_batch_size: int = 5000
     # Количество потоков обработки пакета.
     workers: int = 4
-    # Размер LRU-кэша разобранных адресов (на процесс).
-    cache_size: int = 200_000
     # Как часто проверять появление/обновление файла БД, сек.
     db_reload_interval: float = 5.0
     log_level: str = "INFO"
@@ -65,7 +62,6 @@ class Settings:
             db_path=os.getenv("ADDRESS_DB_PATH", _DEFAULTS["db_path"]),
             max_batch_size=_int_env("MAX_BATCH_SIZE", _DEFAULTS["max_batch_size"]),
             workers=min(_int_env("PARSER_WORKERS", min(4, cpu)), 32),
-            cache_size=_int_env("PARSER_CACHE_SIZE", _DEFAULTS["cache_size"]),
             db_reload_interval=_float_env("DB_RELOAD_INTERVAL", _DEFAULTS["db_reload_interval"]),
             log_level=os.getenv("LOG_LEVEL", _DEFAULTS["log_level"]).upper(),
         )

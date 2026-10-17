@@ -73,7 +73,7 @@ nginx резолвит адрес бэкенда при каждом запро�
 > Windows: если сборка падает с `set: line 2: illegal option -`, значит
 > `offline-map/fetch.sh` получил CRLF. В корневом `.gitattributes` зафиксирован
 > LF, а Dockerfile очищает `\r` перед запуском. После `git pull` пересоберите:
-> `docker compose build --no-cache web`.
+> `docker compose -f docker-compose.yml -f docker-compose.build.yml build --no-cache web`.
 
 ## Контракт с бэкендом
 
