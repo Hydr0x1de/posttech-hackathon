@@ -152,6 +152,44 @@ def _is_pseudo_district(name: str) -> bool:
     return bool(_PSEUDO_DISTRICT_RE.search(normalize(name)))
 
 
+def _has_explicit_district_hint(tokens: Sequence[Token], item: _Classification) -> bool:
+    """Есть ли рядом слово "район"/"аудан" — тогда это точно район."""
+    if _hint_kind(tokens, item.end) == "district":
+        return True
+    if item.start > 0 and _HINT_TO_KIND.get(tokens[item.start - 1].norm) == "district":
+        return True
+    # Классификатор может захватить служебное слово в свой спан
+    # ("район Туран" -> start=0, end=2).
+    return any(
+        _HINT_TO_KIND.get(tokens[index].norm) == "district"
+        for index in range(item.start, item.end)
+    )
+
+
+def _district_shadowed_by_street(
+    repository: AddressRepository | NullAddressRepository,
+    tokens: Sequence[Token],
+    item: _Classification,
+) -> bool:
+    """Одно и то же слово есть и районом, и улицей/проспектом.
+
+    Пример: "Туран" — район в Шымкенте и проспект/улица в Астане/Шымкенте.
+    Без явного слова "район" отдаём приоритет названию улицы, чтобы
+    street_name не остался пустым.
+    """
+    if _has_explicit_district_hint(tokens, item):
+        return False
+    target = fold_kazakh(normalize(item.item.name))
+    if not target:
+        return False
+    for entity in repository.search_streets([item.item.norm], limit=16):
+        if entity.entity_type != "street":
+            continue
+        if any(fold_kazakh(name) == target for name in _target_names(entity)):
+            return True
+    return False
+
+
 def _hint_kind(tokens: Sequence[Token], end: int) -> str | None:
     """Служебное слово сразу после названия уточняет тип классификатора."""
     if end < len(tokens):
@@ -654,14 +692,19 @@ class AddressParserService:
         }
         filtered: list[_Classification] = []
         for item in classifications:
-            if item.kind == "district" and (
-                normalize(item.item.name) in city_norms
-                or _is_pseudo_district(item.item.name)
-            ):
-                # В Казахстане есть районы, названные как города ("Алматы",
-                # "Тараз"), и псевдорайоны "X Г.А". Это не район адреса.
-                used |= set(range(item.start, item.end))
-                continue
+            if item.kind == "district":
+                if (
+                    normalize(item.item.name) in city_norms
+                    or _is_pseudo_district(item.item.name)
+                ):
+                    # В Казахстане есть районы, названные как города ("Алматы",
+                    # "Тараз"), и псевдорайоны "X Г.А". Это не район адреса.
+                    used |= set(range(item.start, item.end))
+                    continue
+                if _district_shadowed_by_street(repository, tokens, item):
+                    # "Туран" без слова "район" — это улица/проспект, а не
+                    # район. Токен оставляем свободным для поиска в БД.
+                    continue
             filtered.append(item)
         classifications = filtered
         for item in classifications:

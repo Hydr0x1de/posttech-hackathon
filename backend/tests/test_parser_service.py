@@ -312,3 +312,42 @@ def test_unlinked_leading_entity_blocks_city_hallucination():
     best = _EntityMatch(linked, start=8, end=20, score=1.0)
     assert _has_unlinked_leading_candidate(tokens, [unlinked, linked], best) is True
     assert _has_unlinked_leading_candidate(tokens, [linked], best) is False
+
+
+def test_district_name_yields_to_street_without_explicit_hint():
+    """"Туран" без слова "район" — сначала улица/проспект, а не район."""
+    from app.core.text import Token
+    from app.repositories.repository import Classifier, StreetEntity
+    from app.services.parser import _Classification, _district_shadowed_by_street
+
+    class Repo:
+        def search_streets(self, tokens, **_kwargs):
+            return [
+                StreetEntity(
+                    id=1,
+                    entity_type="street",
+                    name_official="проспект Туран",
+                    name_norm="проспект туран",
+                    name_core_norm="туран",
+                    street_type="проспект",
+                    city_id=22,
+                    district_id=None,
+                    province_id=6,
+                    names=("проспект туран", "туран"),
+                )
+            ]
+
+    item = _Classification(
+        kind="district",
+        item=Classifier(id=483, name="Туран", norm="туран", parent_id=23),
+        start=0,
+        end=1,
+    )
+    tokens = [Token("Туран", "туран", 0, 5)]
+    assert _district_shadowed_by_street(Repo(), tokens, item) is True
+
+    tokens_with_hint = [Token("район", "район", 0, 5), Token("Туран", "туран", 6, 11)]
+    item_with_hint = _Classification(
+        kind="district", item=item.item, start=0, end=2
+    )
+    assert _district_shadowed_by_street(Repo(), tokens_with_hint, item_with_hint) is False
