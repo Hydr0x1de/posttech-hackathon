@@ -14,6 +14,7 @@ from app.api.v1 import router as api_router
 from app.config import Settings, get_settings
 from app.models import HealthResponse
 from app.repositories.repository import RepositoryManager
+from app.services.geocode import GeocoderService
 from app.services.parser import AddressParserService
 
 logger = logging.getLogger("app")
@@ -41,6 +42,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             manager.get,
             workers=settings.workers,
         )
+        app.state.geocoder = GeocoderService(
+            manager.get,
+            app.state.parser,
+            workers=settings.workers,
+        )
         health = manager.health()
         if health.get("db_loaded"):
             logger.info("Сервис запущен с базой %s", settings.db_path)
@@ -59,7 +65,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version=settings.version,
         description=(
             "Разбор адресов Казахстана: структурные элементы вырезаются как слайсы "
-            "исходной строки, классификаторы стандартизируются по базе адресов."
+            "исходной строки, классификаторы стандартизируются по базе адресов. "
+            "Геокодинг (дом -> улица -> район -> город -> область) работает офлайн "
+            "по вшитой в образ базе."
         ),
         lifespan=lifespan,
     )

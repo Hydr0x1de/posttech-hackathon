@@ -10,7 +10,15 @@ from fastapi import APIRouter, Body, HTTPException, Request, Response, status
 from starlette.concurrency import run_in_threadpool
 
 from app.config import Settings
-from app.models import AddressRecord, BatchRequest, HealthResponse, ParsedAddressModel
+from app.models import (
+    AddressRecord,
+    BatchRequest,
+    GeocodeBatchRequest,
+    GeocodeRecord,
+    GeocodeResponseModel,
+    HealthResponse,
+    ParsedAddressModel,
+)
 from app.services.parser import AddressParserService
 
 logger = logging.getLogger(__name__)
@@ -84,6 +92,81 @@ async def parse_batch(
     response.headers["X-Records"] = str(len(results))
     logger.info("parse/batch: %d записей за %.1f мс", len(results), elapsed_ms)
     return [ParsedAddressModel.from_result(item) for item in results]
+
+
+@router.post(
+    "/geocode",
+    response_model=GeocodeResponseModel,
+    summary="Геокодинг одного адреса",
+    description=(
+        "Принимает либо `raw_address`, либо уже разобранные поля `city`, "
+        "`street_name`, `house`. Возвращает точку и `precision`: `house`, "
+        "`house_approx`, `street`, `living_area`, `district`, `city`, "
+        "`province` или `null`. Статус всегда 200 — фронту проще."
+    ),
+)
+async def geocode(request: Request, record: GeocodeRecord) -> GeocodeResponseModel:
+    geocoder = request.app.state.geocoder
+    result = await run_in_threadpool(
+        geocoder.geocode,
+        record.id,
+        raw_address=record.raw_address,
+        city=record.city,
+        street_name=record.street_name,
+        house=record.house,
+    )
+    return GeocodeResponseModel.from_result(result)
+
+
+@router.post(
+    "/geocode/batch",
+    response_model=list[GeocodeResponseModel],
+    response_model_exclude_none=False,
+    summary="Пакетный геокодинг адресов",
+    description=(
+        "Принимает массив записей `[{id, raw_address | city/street_name/house}]` "
+        "или объект `{items: [...]}` и возвращает массив точек в том же порядке. "
+        "Заголовки ответа: `X-Records`, `X-Elapsed-Ms`."
+    ),
+)
+async def geocode_batch(
+    request: Request,
+    response: Response,
+    payload: Annotated[
+        list[GeocodeRecord] | GeocodeBatchRequest,
+        Body(
+            description=(
+                "Массив записей `[{id, raw_address}]` или объект "
+                "`{\"items\": [{id, raw_address}]}`."
+            ),
+        ),
+    ],
+) -> list[GeocodeResponseModel]:
+    settings = _settings(request)
+    records = payload.items if isinstance(payload, GeocodeBatchRequest) else payload
+    if len(records) > settings.max_batch_size:
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail=(
+                f"Пакет слишком большой: {len(records)} записей, "
+                f"максимум {settings.max_batch_size}"
+            ),
+        )
+
+    started = time.perf_counter()
+    geocoder = request.app.state.geocoder
+    results = await run_in_threadpool(
+        geocoder.geocode_batch,
+        [
+            (record.id, record.raw_address, record.city, record.street_name, record.house)
+            for record in records
+        ],
+    )
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    response.headers["X-Elapsed-Ms"] = f"{elapsed_ms:.1f}"
+    response.headers["X-Records"] = str(len(results))
+    logger.info("geocode/batch: %d записей за %.1f мс", len(results), elapsed_ms)
+    return [GeocodeResponseModel.from_result(item) for item in results]
 
 
 @router.get(

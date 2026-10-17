@@ -78,6 +78,34 @@ CREATE VIRTUAL TABLE fts_address USING fts5(
 CREATE INDEX idx_streets_city ON streets_and_areas(city_id);
 CREATE INDEX idx_streets_name_norm ON streets_and_areas(name_norm);
 CREATE INDEX idx_streets_core_norm ON streets_and_areas(name_core_norm);
+CREATE INDEX idx_sa_city_core ON streets_and_areas(city_id, name_core_norm);
+CREATE INDEX idx_sa_city_norm ON streets_and_areas(city_id, name_norm);
+
+-- Дома с координатами: единственный источник точек для геокодинга.
+CREATE TABLE houses (
+    id INTEGER PRIMARY KEY,
+    street_id INTEGER,
+    city_id INTEGER,
+    district_id INTEGER,
+    province_id INTEGER,
+    housenumber TEXT,
+    housenumber_norm TEXT,
+    street_norm TEXT,
+    street_core_norm TEXT,
+    street_raw TEXT,
+    place_norm TEXT,
+    addr_city_norm TEXT,
+    place_id INTEGER,
+    lat REAL,
+    lon REAL,
+    building TEXT,
+    levels INTEGER
+);
+
+CREATE INDEX idx_houses_street ON houses(street_id);
+CREATE INDEX idx_houses_city ON houses(city_id);
+CREATE INDEX idx_houses_district ON houses(district_id);
+CREATE INDEX idx_houses_norm ON houses(housenumber_norm);
 """
 
 PROVINCES = [
@@ -115,6 +143,7 @@ DISTRICTS = [
     (7, 4, 4, "Астанинский"),
     (8, 5, 6, "Казыбекбийский"),
     (9, 6, 5, "Илийский"),
+    (10, 8, 6, "Балхашский"),
 ]
 
 # (city_id, district_id, province_id, entity_type, street_type, name, aliases)
@@ -154,6 +183,34 @@ STREETS = [
     (7, None, 7, "street", "улица", "Жайлау", None),
     (8, None, 6, "street", "улица", "Деева", None),
     (9, None, 8, "street", "улица", "Кабанбай батыра", None),
+]
+
+
+# (street_id, city_id, district_id, province_id, housenumber, lat, lon, place_id)
+# street_id — позиция в STREETS (нумерация начинается с 1).
+HOUSES = [
+    # Алматы, Абая: точный дом, "1/2" и "12" — разные дома.
+    (1, 1, 1, 1, "47", 43.2424586, 76.9423147, None),
+    (1, 1, 1, 1, "12", 43.2400000, 76.9400000, None),
+    (1, 1, 1, 1, "1/2", 43.2410000, 76.9410000, None),
+    (1, 1, 1, 1, "12а", 43.2390000, 76.9390000, None),
+    # Казыбек би: два дома на номер 55 -> house_approx.
+    (2, 1, 1, 1, "55", 43.2500000, 76.9500000, None),
+    (2, 1, 1, 1, "55", 43.2600000, 76.9600000, None),
+    # Кабанбай батыра: дома есть, номера 999 нет -> street.
+    (3, 1, 1, 1, "10", 43.2300000, 76.9300000, None),
+    (3, 1, 1, 1, "20", 43.2310000, 76.9310000, None),
+    # Астана, Кунаева.
+    (10, 2, 5, 2, "5", 51.1600000, 71.4200000, None),
+    # Шымкент, Тауке хана: даёт дома провинции 7 для province-фоллбэка.
+    (15, 3, None, 7, "1", 42.3200000, 69.5900000, None),
+    # Актобе, 12 микрорайон (living_area): house и living_area.
+    (21, 4, None, 4, "5", 50.2800000, 57.1700000, 21),
+    (21, 4, None, 4, "6", 50.2810000, 57.1710000, 21),
+    # Конаев, Пушкина: город 6 получает центроид для city-фоллбэка.
+    (26, 6, 9, 5, "10", 43.8700000, 77.0600000, None),
+    # Балхаш: дом без city_id, но с district_id=10 -> district-фоллбэк.
+    (28, None, 10, 6, "99", 46.8400000, 74.9900000, None),
 ]
 
 
@@ -206,11 +263,27 @@ def build(path: Path) -> None:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             fts_rows,
         )
+        conn.executemany(
+            """INSERT INTO houses
+               (street_id, city_id, district_id, province_id, housenumber,
+                housenumber_norm, lat, lon, place_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            [
+                (
+                    street_id, city_id, district_id, province_id, housenumber,
+                    normalize(housenumber).replace(" ", ""), lat, lon, place_id,
+                )
+                for (
+                    street_id, city_id, district_id, province_id, housenumber,
+                    lat, lon, place_id,
+                ) in HOUSES
+            ],
+        )
         conn.commit()
     finally:
         conn.close()
     print(f"База создана: {path} (provinces={len(PROVINCES)}, cities={len(CITIES)}, "
-          f"districts={len(DISTRICTS)}, streets={len(STREETS)})")
+          f"districts={len(DISTRICTS)}, streets={len(STREETS)}, houses={len(HOUSES)})")
 
 
 def main() -> None:
