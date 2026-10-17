@@ -441,6 +441,38 @@ def _match_entity(
     return best
 
 
+def _has_unlinked_leading_candidate(
+    name_tokens: Sequence[Token],
+    candidates: Sequence[StreetEntity],
+    best: _EntityMatch,
+) -> bool:
+    """Ведущее название есть в БД, но не слинковано с городом.
+
+    Пример: "Нурсити 2 микрорайон ..." — «Нурсити» находится как street
+    с city_id=NULL, но парсер выбирает более длинный "2 микрорайон"
+    из случайного города. В таком случае город из БД использовать нельзя.
+    """
+    # Сам выбранный объект не слинкован — город точно не подставляем.
+    if best.entity.city_id is None:
+        return True
+    if not name_tokens or len(name_tokens[0].norm) < 2:
+        return False
+
+    first = name_tokens[0]
+    first_norm = fold_kazakh(first.norm)
+    for candidate in candidates:
+        if candidate.city_id is not None or candidate.id == best.entity.id:
+            continue
+        for target in _target_names(candidate):
+            folded = fold_kazakh(target)
+            if folded == first_norm or folded.startswith(first_norm + " "):
+                # Ведущее слово не входит в выбранный спан — совпадение
+                # относится к другому, непривязанному названию.
+                if best.start > first.start:
+                    return True
+    return False
+
+
 def _is_ambiguous_match(
     name_tokens: Sequence[Token],
     candidates: Sequence[StreetEntity],
@@ -732,10 +764,11 @@ class AddressParserService:
                 trust_parents = level != "none"
             else:
                 ambiguous = _is_ambiguous_match(name_tokens, candidates, match)
-                trust_parents = not ambiguous
-                # Без города/области в тексте неоднозначную улицу не обогащаем
-                # регионами и отдаём низкую уверенность (ТЗ, P0-3.2).
-                weak = ambiguous and not explicit_geo
+                unlinked = _has_unlinked_leading_candidate(name_tokens, candidates, match)
+                trust_parents = not ambiguous and not unlinked
+                # Без города в тексте неоднозначную улицу или название,
+                # не привязанное к городу, не обогащаем регионами.
+                weak = unlinked or (ambiguous and not explicit_geo)
 
         # 6. Заполнение названия и обогащение из БД.
         if match is not None:
@@ -798,14 +831,17 @@ class AddressParserService:
             found = repository.search_streets(query_tokens, **filters)  # type: ignore[arg-type]
             if not found:
                 continue
+            matched_pool = found
             if preferred_type is not None:
                 # "66 квартал" не должен матчиться на улицу "66", а
                 # "Мкр Аксай 3а" — на улицу "Аксай".
                 typed = [item for item in found if item.entity_type == preferred_type]
                 if typed:
-                    found = typed
-            match = _match_entity(name_tokens, found)
+                    matched_pool = typed
+            match = _match_entity(name_tokens, matched_pool)
             if match is not None:
+                # Возвращаем полный пул: по нему проверяем неоднозначность
+                # и несвязанные с городом ведущие названия.
                 return match, level, found
         return None, "none", []
 

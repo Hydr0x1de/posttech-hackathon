@@ -279,3 +279,36 @@ def test_exact_match_prefers_entity_with_street_type():
     match = _exact_match(tokens, [entity(1, None), entity(2, "улица")])
     assert match is not None
     assert match.entity.street_type == "улица"
+
+
+def test_unlinked_leading_entity_blocks_city_hallucination():
+    """"Нурсити" не слинкован с городом — чужой city из "2 микрорайон" не берём."""
+    from app.core.text import Token
+    from app.repositories.repository import StreetEntity
+    from app.services.parser import _EntityMatch, _has_unlinked_leading_candidate
+
+    tokens = [
+        Token("Нурсити", "нурсити", 0, 7),
+        Token("2", "2", 8, 9),
+        Token("микрорайон", "микрорайон", 10, 20),
+    ]
+
+    def entity(entity_id: int, name: str, core: str, city_id: int | None) -> StreetEntity:
+        return StreetEntity(
+            id=entity_id,
+            entity_type="street" if city_id is None else "living_area",
+            name_official=name,
+            name_norm=core,
+            name_core_norm=core,
+            street_type="улица" if city_id is None else "микрорайон",
+            city_id=city_id,
+            district_id=367,
+            province_id=3,
+            names=(core,),
+        )
+
+    unlinked = entity(1, "Нурсити", "нурсити", None)
+    linked = entity(2, "2 микрорайон", "2 микрорайон", 255)
+    best = _EntityMatch(linked, start=8, end=20, score=1.0)
+    assert _has_unlinked_leading_candidate(tokens, [unlinked, linked], best) is True
+    assert _has_unlinked_leading_candidate(tokens, [linked], best) is False

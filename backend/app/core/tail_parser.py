@@ -54,6 +54,11 @@ class TailSpans:
 
 def _take_first(work: WorkText, pattern, target: str, spans: TailSpans) -> bool:  # noqa: ANN001
     for match in pattern.finditer(work.text):
+        # Постфиксная форма ("67 ... под 5") не должна перепрыгивать через
+        # уже вырезанный и замаскированный фрагмент ("кв 298"): иначе номер
+        # дома/квартиры приклеивается к чужому ключевому слову.
+        if work.has_masked_in(match.start(), match.end()):
+            continue
         value = work.original_slice(match.start("num"), match.end("num"))
         if not value:
             continue

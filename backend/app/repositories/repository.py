@@ -97,6 +97,11 @@ class ClassifierIndex:
 # Города республиканского значения: провинция совпадает с городом (ТЗ, п.3).
 REPUBLICAN_CITIES = frozenset({"алматы", "астана", "шымкент", "нур-султан", "аstana"})
 
+# Исправления опечаток в справочнике провинций (ключ — normalize(name)).
+PROVINCE_NAME_FIXES = {
+    "улутауская область": "Улытауская область",
+}
+
 # --------------------------------------------------------------------------- #
 # Стемминг для сопоставления падежных форм ("Ауэзовского района" -> "Ауэзовский")
 # --------------------------------------------------------------------------- #
@@ -269,7 +274,9 @@ class SQLiteAddressRepository:
         index = ClassifierIndex()
         if "provinces" in tables:
             for row in conn.execute("SELECT id, name FROM provinces"):
-                item = Classifier(id=row["id"], name=row["name"], norm=normalize(row["name"]))
+                name = row["name"]
+                name = PROVINCE_NAME_FIXES.get(normalize(name), name)
+                item = Classifier(id=row["id"], name=name, norm=normalize(name))
                 index.provinces.append(item)
                 index.province_by_id[item.id] = item
         if "cities" in tables:

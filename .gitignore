@@ -57,3 +57,5 @@ backend/data/*.db
 *.pbf
 base-builder/*.db
 base-builder/*.json
+
+ТЗ_JanaAddress.md

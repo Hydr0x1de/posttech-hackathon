@@ -1,6 +1,6 @@
 # Jana Address
 
-**High-performance автономный REST API для структурного разбора адресов Казахстана.**
+**High-performance автономный сервис структурного разбора адресов Казахстана: REST API + веб-интерфейс.**
 
 Сервис принимает свободно написанный адрес (`"г. Актобе, ул. Абая, д. 55/6, кв 12"`),
 выделяет 14 полей по ТЗ и возвращает их в формате JSON. Текстовые поля — **точные
@@ -8,7 +8,13 @@
 классификаторы (`province`, `city`, `district`, `street_type`) приводятся к
 каноническим значениям из базы адресов.
 
-`Python 3.12` · `FastAPI` · `SQLite FTS5` · `Docker` · `ruff` · `pytest (81 tests)`
+`Python 3.12` · `FastAPI` · `SQLite FTS5` · `React 19 + Vite` · `nginx` · `Docker` · `ruff` · `pytest`
+
+| Компонент | Адрес |
+|---|---|
+| Веб-интерфейс | **http://localhost:8080** |
+| REST API / Swagger | **http://localhost:8000** · `/docs` |
+| Healthcheck | http://localhost:8000/api/v1/health |
 
 ---
 
@@ -23,7 +29,7 @@
 | База адресов | 49 541 улица/жилой массив, 20 областей, 238 городов, 230 районов |
 | Режим БД | SQLite + FTS5, read-only (`mode=ro`), hot-reload по mtime |
 | Размер боевой БД | 246.6 MB (закоммичена в репозиторий) |
-| QA | `ruff check` — 0 ошибок; `pytest` — 81 passed |
+| QA | `ruff check` — 0 ошибок; `pytest` — 83 passed |
 
 ---
 
@@ -138,19 +144,38 @@ raw_address
 docker compose up -d --build
 ```
 
-Контейнер поднимется на `http://localhost:8000`. База
-`backend/data/address_base.db` монтируется в `/data` **read-only**, поэтому
-образ работает автономно и не зависит от интернета.
+Поднимаются два сервиса:
+
+| Сервис | Контейнер | Порт | Назначение |
+|---|---|---|---|
+| `api` | `jana-address-api` | `8000` | FastAPI + SQLite FTS5 |
+| `web` | `jana-address-web` | `8080` | React/Vite UI + nginx-прокси `/api/*` → `api:8000` |
+
+- **Интерфейс:** http://localhost:8080
+- **API:** http://localhost:8000
+- **Swagger:** http://localhost:8000/docs
+
+`web` стартует только после того, как healthcheck `api` подтвердит
+`db_loaded: true`. База `backend/data/address_base.db` монтируется в API
+контейнер как `/data` **read-only**, поэтому запущенная система работает
+автономно и не зависит от интернета.
 
 Проверка:
 
 ```bash
 docker compose ps
+curl -s http://localhost:8080/api/v1/health | python3 -m json.tool
 curl -s http://localhost:8000/api/v1/health | python3 -m json.tool
 ```
 
-Healthcheck контейнера считается успешным только если API отвечает и
-`db_loaded: true`. Остановка:
+nginx проксирует `/api/*` на бэкенд, поэтому фронтенд и API находятся на одном
+origin — CORS для браузера не требуется.
+
+> Первая сборка `web` требует интернет для `npm ci` и загрузки офлайн-тайлов
+> карты в Docker-стадию `maps`. После сборки образ и запущенная система
+> работают без сети.
+
+Остановка:
 
 ```bash
 docker compose down
@@ -174,6 +199,14 @@ pytest -q
 ```
 
 Swagger UI: `http://localhost:8000/docs`, ReDoc: `http://localhost:8000/redoc`.
+
+Фронтенд отдельно:
+
+```bash
+cd jana-post-front
+npm ci
+npm run dev          # http://localhost:5173, /api проксируется на :8000
+```
 
 ---
 
@@ -267,7 +300,9 @@ curl -s -X POST http://localhost:8000/api/v1/parse/batch \
 `CORSMiddleware` включён: разрешены `*` origins, все методы и заголовки.
 `X-Records` и `X-Elapsed-Ms` добавлены в `expose_headers`, поэтому фронтенд на
 `localhost:3000`, `localhost:5173` или `localhost:8080` может читать их из JS.
-Для публичного продакшена список origins стоит сузить до конкретных доменов.
+В Docker-сборке запросы идут через nginx (`/api/*` → `api:8000`) на том же
+origin. Для публичного продакшена список origins стоит сузить до конкретных
+доменов.
 
 ### Поля ответа (14 полей ТЗ)
 
@@ -306,6 +341,23 @@ curl -s -X POST http://localhost:8000/api/v1/parse/batch \
 
 ---
 
+## Веб-интерфейс
+
+Интерфейс доступен на **http://localhost:8080** (`jana-post-front`, React 19 + Vite,
+в Docker — nginx). Сценарий работы:
+
+1. Загрузить JSON-массив `[{ "id": "...", "raw_address": "..." }]` или вставить адреса текстом.
+2. Посмотреть разбор, отфильтровать записи с `confidence < 0.7`, при необходимости
+   вручную исправить поля.
+3. Скачать результат кнопкой **«Скачать JSON»** — файл всегда называется
+   **`sample_output.json`** и содержит 14 полей ТЗ.
+
+Запросы идут на `/api/v1/parse/batch`. В dev-режиме Vite проксирует `/api` на
+`http://localhost:8000`, в Docker — nginx проксирует на `http://api:8000`.
+Сессия сохраняется в `localStorage`, офлайн-карта работает без внешних CDN.
+
+---
+
 ## Производительность
 
 ```bash
@@ -333,9 +385,15 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 
 ```
 .
-├── docker-compose.yml          # одна команда запуска из корня
+├── docker-compose.yml          # api + web, одна команда запуска из корня
 ├── README.md
-├── .gitignore                  # кэши, .venv, логи; боевая БД не игнорируется
+├── .gitignore                  # кэши, .venv, node_modules, логи; боевая БД не игнорируется
+├── jana-post-front/            # React 19 + Vite UI
+│   ├── Dockerfile              # Vite build → nginx + офлайн-тайлы
+│   ├── nginx/default.conf.template  # SPA + proxy /api/* → API_UPSTREAM
+│   ├── src/api/client.js       # API_BASE = /api/v1
+│   ├── src/App.jsx             # экспорт sample_output.json
+│   └── offline-map/            # скрипт загрузки PMTiles
 ├── backend/
 │   ├── Dockerfile              # multi-stage, непривилегированный пользователь
 │   ├── .dockerignore
@@ -359,7 +417,7 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 │   │   ├── bench.py            # замер производительности
 │   │   └── make_demo_db.py     # демо-БД для тестов
 │   ├── sample_output.json      # пример ответа
-│   └── tests/                  # 81 pytest-тест
+│   └── tests/                  # 83 pytest-теста
 └── base-builder/
     ├── build_osm_db.py         # offline ETL: OSM PBF + КАТО → address_base.db
     └── README.md
@@ -386,8 +444,10 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 - `backend/data/address_base.db` (246.6 MB) **закоммичена в репозиторий** —
   это осознанное требование автономности: `docker compose up` не должен
   скачивать или собирать базу.
-- В `docker-compose.yml` каталог `backend/data` монтируется в `/data:ro`;
-  переменная `ADDRESS_DB_PATH=/data/address_base.db`.
+- В `docker-compose.yml` каталог `backend/data` монтируется в API-контейнер
+  как `/data:ro`; переменная `ADDRESS_DB_PATH=/data/address_base.db`.
+- Сервис `web` собирается из `jana-post-front`, слушает `8080` и проксирует
+  `/api/*` на `http://api:8000`. `depends_on` ждёт `service_healthy`.
 - `.dockerignore` исключает `data/*` из build context, чтобы 247 MB не
   отправлялись в Docker daemon при каждой сборке. В контейнер база попадает
   только через volume.
@@ -408,7 +468,7 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 ```bash
 cd backend
 ruff check app tests scripts   # All checks passed!
-pytest -q                      # 81 passed
+pytest -q                      # 83 passed
 ```
 
 Тесты покрывают:

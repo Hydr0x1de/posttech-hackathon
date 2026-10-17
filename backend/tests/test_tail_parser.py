@@ -60,6 +60,15 @@ def test_positional_fallback():
     assert spans.floor == "9"
 
 
+def test_masked_apartment_does_not_shift_house_entrance_floor():
+    """Постфиксные regex не должны перепрыгивать через замаскированное "кв 298"."""
+    _, spans = _tail("ул. Абая 67 кв 298 под 5 эт 8")
+    assert spans.house == "67"
+    assert spans.apartment == "298"
+    assert spans.entrance == "5"
+    assert spans.floor == "8"
+
+
 def test_core_number_not_treated_as_house():
     _, spans = _tail("12 микрорайон, дом 5")
     assert spans.house == "5"
