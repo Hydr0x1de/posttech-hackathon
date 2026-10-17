@@ -3,6 +3,10 @@
 `address_base.db` (246.6 MB) is **not stored in Git**: GitHub rejects files
 larger than 100 MB.
 
+The same file contains both the address dictionary (FTS5) and the `houses`
+table with 1 295 507 geocoded buildings, so the API can geocode fully offline
+(no external geocoder, no reverse-geocoding).
+
 The database is **baked into the published API image**:
 
 ```text

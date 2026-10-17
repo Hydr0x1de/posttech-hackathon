@@ -17,7 +17,7 @@ import bisect
 import difflib
 import logging
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
@@ -87,6 +87,12 @@ class ParsedAddress:
     entrance: str | None = None
     floor: str | None = None
     confidence: float = 0.5
+    # Внутренние идентификаторы для геокодинга. В API (`to_dict`) не попадают.
+    street_id: int | None = None
+    city_id: int | None = None
+    district_id: int | None = None
+    province_id: int | None = None
+    street_entity_type: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -129,6 +135,28 @@ class _Classification:
 
 
 @dataclass(slots=True)
+class _ParsedFields:
+    """Поля ответа + внутренние id для геокодера."""
+
+    values: tuple[object, ...]
+    street_id: int | None = None
+    city_id: int | None = None
+    district_id: int | None = None
+    province_id: int | None = None
+    street_entity_type: str | None = None
+
+    # Обратная совместимость с прежним tuple-результатом `_parse_fields`.
+    def __iter__(self) -> Iterator[object]:
+        return iter(self.values)
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    def __getitem__(self, index: int) -> object:
+        return self.values[index]
+
+
+@dataclass(slots=True)
 class _CoreResult:
     province: str | None = None
     city: str | None = None
@@ -138,6 +166,12 @@ class _CoreResult:
     living_area: str | None = None
     confidence: float = 0.5
     matched: bool = False
+    # Внутренние id (в ответ API не выводятся, нужны только геокодеру).
+    street_id: int | None = None
+    city_id: int | None = None
+    district_id: int | None = None
+    province_id: int | None = None
+    street_entity_type: str | None = None
 
 
 # --------------------------------------------------------------------------- #
@@ -568,11 +602,16 @@ class AddressParserService:
         return self._repository_provider()
 
     def parse(self, record_id: str, raw_address: str) -> ParsedAddress:
-        values = self._parse_fields(raw_address or "")
+        fields = self._parse_fields(raw_address or "")
         return ParsedAddress(
             id=record_id,
             raw_address=raw_address or "",
-            **dict(zip(_FIELDS, values, strict=True)),
+            **dict(zip(_FIELDS, fields.values, strict=True)),
+            street_id=fields.street_id,
+            city_id=fields.city_id,
+            district_id=fields.district_id,
+            province_id=fields.province_id,
+            street_entity_type=fields.street_entity_type,
         )
 
     def parse_batch(self, records: Iterable[tuple[str, str]]) -> list[ParsedAddress]:
@@ -587,9 +626,9 @@ class AddressParserService:
 
     # -- основной конвейер ------------------------------------------------- #
 
-    def _parse_fields(self, raw_address: str) -> tuple[object, ...]:
+    def _parse_fields(self, raw_address: str) -> _ParsedFields:
         if not raw_address or not raw_address.strip():
-            return _EMPTY_FIELDS
+            return _ParsedFields(values=_EMPTY_FIELDS)
 
         work = WorkText(raw_address)
         hints = self._preprocess(work)
@@ -599,19 +638,26 @@ class AddressParserService:
         repository = self._repository_provider()
         core = self._parse_core(work, repository, tail.protected, tail)
 
-        return (
-            core.province,
-            core.city,
-            core.district,
-            core.street_type,
-            core.street_name,
-            core.living_area,
-            tail.landmark,
-            tail.house,
-            tail.apartment,
-            tail.entrance,
-            tail.floor,
-            core.confidence,
+        return _ParsedFields(
+            values=(
+                core.province,
+                core.city,
+                core.district,
+                core.street_type,
+                core.street_name,
+                core.living_area,
+                tail.landmark,
+                tail.house,
+                tail.apartment,
+                tail.entrance,
+                tail.floor,
+                core.confidence,
+            ),
+            street_id=core.street_id,
+            city_id=core.city_id,
+            district_id=core.district_id,
+            province_id=core.province_id,
+            street_entity_type=core.street_entity_type,
         )
 
     # -- шаг 1: предобработка --------------------------------------------- #
@@ -714,6 +760,8 @@ class AddressParserService:
         for item in classifications:
             used |= set(range(item.start, item.end))
             setattr(result, item.kind, item.item.name)
+            # id классификатора нужен геокодеру для фоллбэка на центроид.
+            setattr(result, f"{item.kind}_id", item.item.id)
 
         # 2. Тип улицы/жилого массива — базовое слово.
         type_positions: dict[int, str] = {}
@@ -921,6 +969,10 @@ class AddressParserService:
             # родительские сущности, ни тип из случайного города.
             return
 
+        # Внутренние id — только для доверенного совпадения.
+        result.street_id = entity.id
+        result.street_entity_type = entity.entity_type
+
         # Тип из БД имеет приоритет над регуляркой (ТЗ, шаг 3).
         db_type = vocab.canonical_street_type(entity.street_type) or entity.street_type
         if db_type:
@@ -942,6 +994,14 @@ class AddressParserService:
             if province:
                 result.province = province.name
 
+        # id родительских сущностей нужны для геокодинга (центроиды).
+        if result.city_id is None and entity.city_id is not None:
+            result.city_id = entity.city_id
+        if result.district_id is None and entity.district_id is not None:
+            result.district_id = entity.district_id
+        if result.province_id is None and entity.province_id is not None:
+            result.province_id = entity.province_id
+
     @staticmethod
     def _fill_province_from_city(result: _CoreResult, index: ClassifierIndex) -> None:
         """Авто-обогащение province по найденному городу.
@@ -956,6 +1016,8 @@ class AddressParserService:
             province = index.province_by_id.get(city.parent_id)
             if province is not None:
                 result.province = province.name
+                if result.province_id is None:
+                    result.province_id = province.id
                 return
         if result.city.lower() in REPUBLICAN_CITIES:
             result.province = result.city

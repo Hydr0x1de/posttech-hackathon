@@ -50,6 +50,27 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_address USING fts5(
     search_text                  -- name_norm + aliases
 );
 
+-- Дома с координатами — единственный источник точек для геокодинга.
+CREATE TABLE IF NOT EXISTS houses (
+    id INTEGER PRIMARY KEY,
+    street_id INTEGER,
+    city_id INTEGER,
+    district_id INTEGER,
+    province_id INTEGER,
+    housenumber TEXT,
+    housenumber_norm TEXT,       -- лоссовый ключ: "1/2" -> "12"
+    street_norm TEXT,
+    street_core_norm TEXT,
+    street_raw TEXT,
+    place_norm TEXT,
+    addr_city_norm TEXT,
+    place_id INTEGER,
+    lat REAL,
+    lon REAL,
+    building TEXT,
+    levels INTEGER
+);
+
 -- Индексы, ускоряющие обогащение и поиск родительских сущностей
 CREATE INDEX IF NOT EXISTS idx_cities_province ON cities(province_id);
 CREATE INDEX IF NOT EXISTS idx_cities_name_norm ON cities(name_norm);
@@ -59,3 +80,9 @@ CREATE INDEX IF NOT EXISTS idx_streets_city ON streets_and_areas(city_id);
 CREATE INDEX IF NOT EXISTS idx_streets_district ON streets_and_areas(district_id);
 CREATE INDEX IF NOT EXISTS idx_streets_name_norm ON streets_and_areas(name_norm);
 CREATE INDEX IF NOT EXISTS idx_streets_core_norm ON streets_and_areas(name_core_norm);
+
+-- Индексы геокодинга (ТЗ, разделы 2 и 7).
+CREATE INDEX IF NOT EXISTS idx_houses_street ON houses(street_id);
+CREATE INDEX IF NOT EXISTS idx_houses_city ON houses(city_id);
+CREATE INDEX IF NOT EXISTS idx_houses_district ON houses(district_id);
+CREATE INDEX IF NOT EXISTS idx_houses_norm ON houses(housenumber_norm);

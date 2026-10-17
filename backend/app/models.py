@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.services.geocode import GeocodeResult
 from app.services.parser import ParsedAddress
+
+GeocodePrecision = Literal[
+    "house",
+    "house_approx",
+    "street",
+    "living_area",
+    "district",
+    "city",
+    "province",
+]
 
 
 class AddressRecord(BaseModel):
@@ -71,3 +84,47 @@ class HealthResponse(BaseModel):
     cities: int = 0
     districts: int = 0
     streets: int = 0
+
+
+class GeocodeRecord(BaseModel):
+    """Запрос геокодинга: готовая строка или уже разобранные поля."""
+
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=False)
+
+    id: str = Field(..., min_length=1, max_length=128, description="Идентификатор записи")
+    raw_address: str | None = Field(
+        default=None, max_length=2048, description="Адрес как его ввёл пользователь"
+    )
+    city: str | None = Field(default=None, max_length=256, description="Город")
+    street_name: str | None = Field(default=None, max_length=512, description="Улица/жилмассив")
+    house: str | None = Field(default=None, max_length=64, description="Номер дома")
+
+
+class GeocodeBatchRequest(BaseModel):
+    """Альтернативная форма тела пакетного геокодинга: `{"items": [...]}`."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    items: list[GeocodeRecord] = Field(default_factory=list, description="Записи для геокодинга")
+
+
+class GeocodeResponseModel(BaseModel):
+    """Точка и её точность. Внутренние id в ответ не попадают."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    lat: float | None = None
+    lon: float | None = None
+    precision: GeocodePrecision | None = None
+    source: str | None = None
+
+    @classmethod
+    def from_result(cls, result: GeocodeResult) -> GeocodeResponseModel:
+        return cls(
+            id=result.id,
+            lat=result.lat,
+            lon=result.lon,
+            precision=result.precision,  # type: ignore[arg-type]
+            source=result.source,
+        )

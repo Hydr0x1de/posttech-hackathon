@@ -72,6 +72,24 @@ class StreetEntity:
     names: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True, slots=True)
+class HousePoint:
+    """Дом с координатами (для forward-геокодинга)."""
+
+    housenumber: str
+    lat: float
+    lon: float
+
+
+@dataclass(frozen=True, slots=True)
+class Centroid:
+    """Средняя точка набора домов и количество использованных строк."""
+
+    lat: float
+    lon: float
+    count: int
+
+
 @dataclass(slots=True)
 class ClassifierIndex:
     provinces: list[Classifier] = field(default_factory=list)
@@ -144,6 +162,7 @@ class AddressRepository(Protocol):
     db_loaded: bool
     db_path: str | None
     has_fts: bool
+    has_houses: bool
 
     def classifiers(self) -> ClassifierIndex: ...
 
@@ -155,6 +174,29 @@ class AddressRepository(Protocol):
         district_ids: Sequence[int] | None = None,
         limit: int = 8,
     ) -> list[StreetEntity]: ...
+
+    def resolve_streets(
+        self,
+        core_norm: str,
+        name_norm: str,
+        *,
+        city_id: int | None = None,
+        limit: int = 20,
+    ) -> list[StreetEntity]: ...
+
+    def find_houses(
+        self, street_id: int, housenumber_key: str, *, limit: int = 50
+    ) -> list[HousePoint]: ...
+
+    def find_houses_by_place(
+        self, place_id: int, housenumber_key: str, *, limit: int = 50
+    ) -> list[HousePoint]: ...
+
+    def street_centroid(self, street_id: int) -> Centroid | None: ...
+
+    def place_centroid(self, place_id: int) -> Centroid | None: ...
+
+    def centroid(self, level: str, entity_id: int) -> Centroid | None: ...
 
     def stats(self) -> dict[str, object]: ...
 
@@ -172,6 +214,7 @@ class NullAddressRepository:
     db_loaded = False
     db_path: str | None = None
     has_fts = False
+    has_houses = False
 
     def __init__(self) -> None:
         self._index = ClassifierIndex()
@@ -181,6 +224,24 @@ class NullAddressRepository:
 
     def search_streets(self, *args: object, **kwargs: object) -> list[StreetEntity]:
         return []
+
+    def resolve_streets(self, *args: object, **kwargs: object) -> list[StreetEntity]:
+        return []
+
+    def find_houses(self, *args: object, **kwargs: object) -> list[HousePoint]:
+        return []
+
+    def find_houses_by_place(self, *args: object, **kwargs: object) -> list[HousePoint]:
+        return []
+
+    def street_centroid(self, *args: object, **kwargs: object) -> Centroid | None:
+        return None
+
+    def place_centroid(self, *args: object, **kwargs: object) -> Centroid | None:
+        return None
+
+    def centroid(self, *args: object, **kwargs: object) -> Centroid | None:
+        return None
 
     def stats(self) -> dict[str, object]:
         return {
@@ -216,6 +277,7 @@ class SQLiteAddressRepository:
         self._index = ClassifierIndex()
         self._has_fts = False
         self._has_core_norm = False
+        self._has_houses = False
         self._street_count = 0
         self._load_metadata()
 
@@ -252,6 +314,10 @@ class SQLiteAddressRepository:
     def has_fts(self) -> bool:
         return self._has_fts
 
+    @property
+    def has_houses(self) -> bool:
+        return self._has_houses
+
     def _load_metadata(self) -> None:
         conn = self._connect()
         tables = {
@@ -259,6 +325,9 @@ class SQLiteAddressRepository:
             for row in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view')")
         }
         self._has_fts = "fts_address" in tables
+        self._has_houses = "houses" in tables
+        if not self._has_houses:
+            logger.info("В %s нет таблицы houses — геокодинг вернёт null", self.db_path)
         if not self._has_fts:
             logger.warning("В %s нет таблицы fts_address — поиск пойдёт через LIKE", self.db_path)
 
@@ -518,6 +587,158 @@ class SQLiteAddressRepository:
         # Сохраняем порядок релевантности из FTS.
         return [by_id[i] for i in ids if i in by_id]
 
+    # -- геокодинг: поиск улиц по точному имени ---------------------------- #
+
+    def resolve_streets(
+        self,
+        core_norm: str,
+        name_norm: str,
+        *,
+        city_id: int | None = None,
+        limit: int = 20,
+    ) -> list[StreetEntity]:
+        """Улицы/жилмассивы, чьё имя точно (или почти) совпадает с запросом.
+
+        Нужен для геокодинга: парсер может выбрать не тот дубль улицы, а
+        дому нужен именно `street_id`, к которому привязаны координаты.
+        Точное решение принимает вызывающий код по `name_core_norm`/алиасам.
+        """
+        core_norm = core_norm or ""
+        name_norm = name_norm or core_norm
+        if not core_norm and not name_norm:
+            return []
+
+        name_conditions: list[str] = ["name_norm = ?", "name_norm LIKE ?"]
+        name_params: list[object] = [name_norm, f"%{core_norm}%"]
+        if self._has_core_norm:
+            name_conditions.insert(0, "name_core_norm = ?")
+            name_params.insert(0, core_norm)
+        name_conditions.append("ifnull(aliases,'') LIKE ?")
+        name_params.append(f"%{core_norm}%")
+
+        where = "(" + " OR ".join(name_conditions) + ")"
+        params: list[object] = list(name_params)
+        if city_id is not None:
+            where = "city_id = ? AND " + where
+            params.insert(0, city_id)
+
+        # Берём с запасом: финальный выбор делается после проверки алиасов.
+        fetch_limit = max(40, limit * 4)
+        if self._has_core_norm:
+            order = (
+                " ORDER BY CASE WHEN name_norm = ? THEN 0 "
+                "WHEN name_core_norm = ? THEN 1 "
+                "WHEN ifnull(aliases,'') LIKE ? THEN 2 ELSE 3 END"
+            )
+            params.extend([name_norm, core_norm, f"%{core_norm}%"])
+        else:
+            order = (
+                " ORDER BY CASE WHEN name_norm = ? THEN 0 "
+                "WHEN ifnull(aliases,'') LIKE ? THEN 1 ELSE 2 END"
+            )
+            params.extend([name_norm, f"%{core_norm}%"])
+        sql = (
+            "SELECT id FROM streets_and_areas WHERE "
+            + where
+            + order
+            + f" LIMIT {int(fetch_limit)}"
+        )
+        try:
+            conn = self._connect()
+            ids = [row["id"] for row in conn.execute(sql, params)]
+            if not ids:
+                return []
+            return self._fetch_entities(conn, ids)[:limit]
+        except sqlite3.Error as exc:
+            logger.warning("Ошибка поиска улицы в БД (%s): %s", self.db_path, exc)
+            return []
+
+    # -- геокодинг: дома и центроиды --------------------------------------- #
+
+    def find_houses(
+        self, street_id: int, housenumber_key: str, *, limit: int = 50
+    ) -> list[HousePoint]:
+        """Префильтр по `street_id` + лоссовому `housenumber_norm`."""
+        return self._find_houses("street_id", street_id, housenumber_key, limit)
+
+    def find_houses_by_place(
+        self, place_id: int, housenumber_key: str, *, limit: int = 50
+    ) -> list[HousePoint]:
+        """То же для жилмассивов, где дом привязан только через `place_id`."""
+        return self._find_houses("place_id", place_id, housenumber_key, limit)
+
+    def _find_houses(
+        self, column: str, entity_id: int, housenumber_key: str, limit: int
+    ) -> list[HousePoint]:
+        if not self._has_houses or entity_id is None or not housenumber_key:
+            return []
+        if column not in {"street_id", "place_id"}:
+            return []
+        sql = (
+            "SELECT housenumber, lat, lon FROM houses "
+            f"WHERE {column} = ? AND housenumber_norm = ? "
+            "AND lat IS NOT NULL AND lon IS NOT NULL LIMIT ?"
+        )
+        try:
+            rows = self._connect().execute(
+                sql, (entity_id, housenumber_key, int(limit))
+            ).fetchall()
+        except sqlite3.Error as exc:
+            logger.warning("Ошибка поиска дома в БД (%s): %s", self.db_path, exc)
+            return []
+        return [
+            HousePoint(
+                housenumber=row["housenumber"] or "",
+                lat=float(row["lat"]),
+                lon=float(row["lon"]),
+            )
+            for row in rows
+        ]
+
+    def street_centroid(self, street_id: int) -> Centroid | None:
+        return self._centroid_by("street_id", street_id)
+
+    def place_centroid(self, place_id: int) -> Centroid | None:
+        return self._centroid_by("place_id", place_id)
+
+    def centroid(self, level: str, entity_id: int) -> Centroid | None:
+        column = _CENTROID_COLUMNS.get(level)
+        if column is None:
+            return None
+        return self._centroid_by(column, entity_id)
+
+    def _centroid_by(self, column: str, entity_id: int) -> Centroid | None:
+        if not self._has_houses or entity_id is None:
+            return None
+        if column not in _CENTROID_COLUMNS.values():
+            return None
+        sql = (
+            "SELECT AVG(lat) AS lat, AVG(lon) AS lon, COUNT(*) AS n "
+            f"FROM houses WHERE {column} = ? "
+            "AND lat IS NOT NULL AND lon IS NOT NULL"
+        )
+        try:
+            row = self._connect().execute(sql, (entity_id,)).fetchone()
+        except sqlite3.Error as exc:
+            logger.warning("Ошибка агрегата БД (%s.%s): %s", column, entity_id, exc)
+            return None
+        if row is None or not row["n"]:
+            return None
+        lat, lon = row["lat"], row["lon"]
+        if lat is None or lon is None:
+            return None
+        return Centroid(lat=float(lat), lon=float(lon), count=int(row["n"]))
+
+
+# Колонки houses, по которым разрешено строить центроиды.
+_CENTROID_COLUMNS = {
+    "street": "street_id",
+    "place": "place_id",
+    "district": "district_id",
+    "city": "city_id",
+    "province": "province_id",
+}
+
 
 def _as_int(value: object) -> int:
     """entity_id в FTS5-колонке UNINDEXED обычно хранится текстом."""
@@ -624,8 +845,10 @@ class RepositoryManager:
 __all__ = [
     "AddressRepository",
     "CLASSIFIER_STOP",
+    "Centroid",
     "Classifier",
     "ClassifierIndex",
+    "HousePoint",
     "NullAddressRepository",
     "REPUBLICAN_CITIES",
     "RepositoryManager",

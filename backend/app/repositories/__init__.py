@@ -2,8 +2,10 @@
 
 from app.repositories.repository import (
     AddressRepository,
+    Centroid,
     Classifier,
     ClassifierIndex,
+    HousePoint,
     NullAddressRepository,
     RepositoryManager,
     SQLiteAddressRepository,
@@ -12,8 +14,10 @@ from app.repositories.repository import (
 
 __all__ = [
     "AddressRepository",
+    "Centroid",
     "Classifier",
     "ClassifierIndex",
+    "HousePoint",
     "NullAddressRepository",
     "RepositoryManager",
     "SQLiteAddressRepository",
