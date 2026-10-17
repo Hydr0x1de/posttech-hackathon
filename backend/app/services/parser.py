@@ -858,12 +858,14 @@ class AddressParserService:
         city_ids = [c.item.id for c in classifications if c.kind == "city"] or None
         district_ids = [c.item.id for c in classifications if c.kind == "district"] or None
         attempts: list[tuple[dict[str, list[int] | None], str]] = []
-        possible = [
-            (city_ids, district_ids, "city_district"),
-            (city_ids, None, "city"),
-        ]
+        possible: list[tuple[list[int] | None, list[int] | None, str]] = []
+        if city_ids:
+            possible.append((city_ids, district_ids, "city_district"))
+            possible.append((city_ids, None, "city"))
         if district_ids:
             possible.append((None, district_ids, "district"))
+        # Без явных фильтров это именно уровень "none", а не city_district:
+        # от него зависит размер пула кандидатов и проверка неоднозначности.
         possible.append((None, None, "none"))
         for city, district, level in possible:
             filters = {"city_ids": city, "district_ids": district}
@@ -871,7 +873,13 @@ class AddressParserService:
                 attempts.append((filters, level))
 
         for filters, level in attempts:
-            found = repository.search_streets(query_tokens, **filters)  # type: ignore[arg-type]
+            # Без фильтра города FTS может вернуть много шумовых совпадений.
+            # Берём больше кандидатов, чтобы не потерять одноимённые улицы
+            # в других городах и корректно определить неоднозначность.
+            search_limit = 32 if level == "none" else 8
+            found = repository.search_streets(
+                query_tokens, limit=search_limit, **filters  # type: ignore[arg-type]
+            )
             if not found:
                 continue
             matched_pool = found
@@ -904,13 +912,15 @@ class AddressParserService:
             else:
                 result.street_name = name_slice
 
+        if not trusted:
+            # Неоднозначное/несвязанное совпадение: не подставляем ни
+            # родительские сущности, ни тип из случайного города.
+            return
+
         # Тип из БД имеет приоритет над регуляркой (ТЗ, шаг 3).
         db_type = vocab.canonical_street_type(entity.street_type) or entity.street_type
         if db_type:
             result.street_type = db_type
-
-        if not trusted:
-            return
 
         # Обогащение родительскими сущностями.
         if result.city is None and entity.city_id is not None:

@@ -351,3 +351,64 @@ def test_district_name_yields_to_street_without_explicit_hint():
         kind="district", item=item.item, start=0, end=2
     )
     assert _district_shadowed_by_street(Repo(), tokens_with_hint, item_with_hint) is False
+
+def test_unfiltered_lookup_uses_wide_limit_and_none_level():
+    """Без города пул кандидатов шире, иначе теряются одноимённые улицы."""
+    from app.core.text import Token
+    from app.repositories.repository import StreetEntity
+    from app.services.parser import AddressParserService
+
+    calls: list[dict[str, object]] = []
+
+    def entity(entity_id: int, city_id: int) -> StreetEntity:
+        return StreetEntity(
+            id=entity_id,
+            entity_type="street",
+            name_official="улица Туран",
+            name_norm="улица туран",
+            name_core_norm="туран",
+            street_type="улица",
+            city_id=city_id,
+            district_id=None,
+            province_id=1,
+            names=("улица туран", "туран"),
+        )
+
+    class Repo:
+        def search_streets(self, tokens, **kwargs):
+            calls.append(kwargs)
+            return [entity(1, 10), entity(2, 20)]
+
+    tokens = [Token("Туран", "туран", 0, 5)]
+    match, level, candidates = AddressParserService._lookup_streets(
+        Repo(), ["туран"], tokens, []
+    )
+    assert match is not None
+    assert level == "none"
+    assert len(candidates) == 2
+    assert calls == [{"limit": 32, "city_ids": None, "district_ids": None}]
+
+
+def test_untrusted_match_does_not_guess_street_type():
+    """Тип улицы из случайного города не подставляем при weak-совпадении."""
+    from app.repositories.repository import ClassifierIndex, StreetEntity
+    from app.services.parser import AddressParserService, _CoreResult
+
+    entity = StreetEntity(
+        id=1,
+        entity_type="street",
+        name_official="проспект Туран",
+        name_norm="проспект туран",
+        name_core_norm="туран",
+        street_type="проспект",
+        city_id=22,
+        district_id=None,
+        province_id=6,
+        names=("проспект туран", "туран"),
+    )
+    result = _CoreResult()
+    AddressParserService._apply_entity(
+        result, entity, ClassifierIndex(), "Туран", trusted=False
+    )
+    assert result.street_type is None
+    assert result.city is None
