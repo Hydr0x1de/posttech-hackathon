@@ -22,8 +22,9 @@ if [ ! -s "$DB_PATH" ]; then
     else
         echo "База данных не найдена. Скачиваем актуальную БД..."
         echo "URL: $DB_URL"
-        if ! curl -fL --retry 5 --retry-delay 5 --connect-timeout 20 \
-            --progress-bar -o "$PART_PATH" "$DB_URL"; then
+        echo "Скачивание 247 MB может занять 1–2 минуты..."
+        if ! curl -fsSL --retry 5 --retry-delay 5 --connect-timeout 20 \
+            -o "$PART_PATH" "$DB_URL"; then
             echo "Не удалось скачать БД. Проверьте ADDRESS_DB_URL и сеть." >&2
             rm -f "$PART_PATH"
             exit 1
