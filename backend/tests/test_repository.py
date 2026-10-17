@@ -104,6 +104,30 @@ def test_aliases_json_parsed(demo_db):
     repo.close()
 
 
+def test_resolve_streets_finds_kazakh_duplicate(turan_db):
+    """resolve_streets(«туран») видит и «Тұран даңғылы», и «проспект Туран»."""
+    repo = SQLiteAddressRepository(turan_db)
+    found = repo.resolve_streets("туран", "туран", city_id=2)
+    assert {entity.id for entity in found} >= {1907, 27127}
+    repo.close()
+
+
+def test_resolve_streets_finds_kazakh_duplicate_without_fts(tmp_path, turan_db):
+    """Без FTS широкий скан по городу всё равно находит оба дубля."""
+    raw = tmp_path / "turan_no_fts.db"
+    shutil.copy2(turan_db, raw)
+    connection = sqlite3.connect(raw)
+    connection.execute("DROP TABLE fts_address")
+    connection.commit()
+    connection.close()
+
+    repo = SQLiteAddressRepository(raw)
+    assert repo.has_fts is False
+    found = repo.resolve_streets("туран", "туран", city_id=2)
+    assert {entity.id for entity in found} >= {1907, 27127}
+    repo.close()
+
+
 def test_broken_db_is_not_fatal(tmp_path):
     path = tmp_path / "broken.db"
     path.write_bytes(b"not a sqlite file at all")

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import shutil
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -9,6 +12,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.core.text import normalize  # noqa: E402
 from scripts.make_demo_db import build  # noqa: E402
 
 
@@ -17,6 +21,68 @@ def demo_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Демо-база, собранная по эталонной схеме (SQLite + FTS5)."""
     path = tmp_path_factory.mktemp("db") / "address_base.db"
     build(path)
+    return path
+
+
+@pytest.fixture(scope="session")
+def turan_db(demo_db: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Демо-база + дубли «Тұран даңғылы» / «проспект Туран» (Астана).
+
+    В production-БД это street_id 1907 и 27127: казахская ұ не сводится
+    к русской у, поэтому геокодер должен видеть оба дубля и искать дом
+    у каждого кандидата.
+    """
+    path = tmp_path_factory.mktemp("db_turan") / "address_base.db"
+    shutil.copy2(demo_db, path)
+    conn = sqlite3.connect(path)
+    try:
+        streets = [
+            (
+                1907, 2, 5, 2, "street", "проспект", "Тұран даңғылы",
+                "тұран даңғылы", "тұран", ["Turan Avenue", "проспект Туран"],
+            ),
+            (
+                27127, 2, 5, 2, "street", "проспект", "проспект Туран",
+                "проспект туран", "туран", ["Turan Avenue", "Тұран даңғылы"],
+            ),
+        ]
+        for (
+            entity_id, city_id, district_id, province_id, entity_type, street_type,
+            official, name_norm, core_norm, aliases,
+        ) in streets:
+            alias_norm = [normalize(alias) for alias in aliases]
+            conn.execute(
+                """INSERT INTO streets_and_areas
+                   (id, city_id, district_id, province_id, entity_type, street_type,
+                    name_official, name_norm, name_core_norm, aliases)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    entity_id, city_id, district_id, province_id, entity_type,
+                    street_type, official, name_norm, core_norm,
+                    json.dumps(alias_norm, ensure_ascii=False),
+                ),
+            )
+            conn.execute(
+                """INSERT INTO fts_address
+                   (entity_id, entity_type, city_id, district_id, province_id,
+                    street_type, name_official, search_text)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(entity_id), entity_type, city_id, district_id, province_id,
+                    street_type, official,
+                    " ".join([name_norm, core_norm, *alias_norm]),
+                ),
+            )
+        conn.execute(
+            """INSERT INTO houses
+               (street_id, city_id, district_id, province_id, housenumber,
+                housenumber_norm, lat, lon, place_id)
+               VALUES (1907, 2, 5, 2, '55/6', '556', ?, ?, NULL)""",
+            (51.1112542, 71.3963038),
+        )
+        conn.commit()
+    finally:
+        conn.close()
     return path
 
 

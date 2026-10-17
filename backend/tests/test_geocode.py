@@ -34,6 +34,12 @@ def client_no_db(tmp_path):
         yield test_client
 
 
+@pytest.fixture()
+def turan_client(turan_db):
+    with _client(str(turan_db)) as test_client:
+        yield test_client
+
+
 def _geocode(client: TestClient, **payload) -> dict:
     body = {"id": "rec_001", **payload}
     response = client.post("/api/v1/geocode", json=body)
@@ -157,6 +163,54 @@ def test_db_without_houses_returns_nulls(truncated_db):
     """Пустая таблица houses — не ошибка, просто координат нет."""
     with _client(str(truncated_db)) as test_client:
         payload = _geocode(test_client, raw_address="Караганда, 12 микрорайон 5")
+    assert payload["precision"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Дубли улиц: Тұран даңғылы / проспект Туран
+# --------------------------------------------------------------------------- #
+
+TURAN_HOUSE = (51.1112542, 71.3963038)
+
+
+def test_turan_duplicate_finds_house_from_parsed_fields(turan_client):
+    """Структурные поля «Астана + Туран + 55/6» находят дом у дубля 1907.
+
+    Точный SQL по name_core_norm не видит «тұран» (ұ ≠ у), поэтому
+    resolve_streets должен добрать оба дубля через fold_kazakh.
+    """
+    payload = _geocode(
+        turan_client, city="Астана", street_name="Туран", house="55/6"
+    )
+    assert payload["precision"] == "house"
+    assert payload["lat"] == pytest.approx(TURAN_HOUSE[0])
+    assert payload["lon"] == pytest.approx(TURAN_HOUSE[1])
+
+
+def test_turan_duplicate_finds_house_from_raw_address(turan_client):
+    payload = _geocode(
+        turan_client,
+        raw_address="Туран 55/6 магазин береке 4подъезд 9этаж Астана",
+    )
+    assert payload["precision"] == "house"
+    assert payload["lat"] == pytest.approx(TURAN_HOUSE[0])
+    assert payload["lon"] == pytest.approx(TURAN_HOUSE[1])
+
+
+def test_turan_duplicate_falls_back_to_street_when_house_missing(turan_client):
+    payload = _geocode(
+        turan_client, city="Астана", street_name="Туран", house="999"
+    )
+    assert payload["precision"] == "street"
+    assert payload["lat"] is not None
+    assert payload["lon"] is not None
+
+
+def test_ambiguous_street_without_city_returns_nulls(client):
+    """Без города одинаковую улицу в разных городах угадывать нельзя."""
+    payload = _geocode(client, street_name="Кабанбай батыра", house="10")
+    assert payload["lat"] is None
+    assert payload["lon"] is None
     assert payload["precision"] is None
 
 

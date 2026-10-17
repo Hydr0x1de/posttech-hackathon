@@ -265,6 +265,41 @@ class NullAddressRepository:
 _FTS_SAFE_RE = re.compile(r"[0-9a-zа-яёәғқңөұүһі]+")
 
 
+def _street_name_keys(entity: StreetEntity) -> set[str]:
+    """Варианты названия улицы, свёрнутые для сравнения без казахских букв."""
+    values = (
+        entity.name_norm,
+        entity.name_core_norm,
+        entity.name_official,
+        *entity.aliases,
+    )
+    return {
+        folded
+        for folded in (fold_kazakh(normalize(value or "")) for value in values)
+        if folded
+    }
+
+
+def _street_matches_query(
+    entity: StreetEntity, core_norm: str, name_norm: str
+) -> bool:
+    """Совпадает ли сущность с запросом с учётом normalize/fold_kazakh.
+
+    Сравниваем не только `name_core_norm`, но и полное имя с алиасами:
+    у дублей одна и та же улица может называться «Тұран даңғылы»,
+    «проспект Туран» или «Turan Avenue».
+    """
+    targets = {
+        folded
+        for folded in (
+            fold_kazakh(normalize(core_norm or "")),
+            fold_kazakh(normalize(name_norm or "")),
+        )
+        if folded
+    }
+    return bool(targets & _street_name_keys(entity))
+
+
 class SQLiteAddressRepository:
     """Чтение `address_base.db` (SQLite + FTS5) без записи."""
 
@@ -538,6 +573,8 @@ class SQLiteAddressRepository:
     def _fetch_entities(
         self, conn: sqlite3.Connection, ids: Sequence[int]
     ) -> list[StreetEntity]:
+        if not ids:
+            return []
         placeholders = ",".join("?" * len(ids))
         core_expr = "name_core_norm" if self._has_core_norm else "NULL AS name_core_norm"
         rows = conn.execute(
@@ -546,46 +583,47 @@ class SQLiteAddressRepository:
                 FROM streets_and_areas WHERE id IN ({placeholders})""",
             list(ids),
         ).fetchall()
-        by_id: dict[int, StreetEntity] = {}
-        for row in rows:
-            raw_aliases = row["aliases"]
-            aliases: tuple[str, ...] = ()
-            if raw_aliases:
-                try:
-                    parsed = json.loads(raw_aliases)
-                    if isinstance(parsed, list):
-                        aliases = tuple(
-                            normalize(str(item)) for item in parsed if str(item).strip()
-                        )
-                except (json.JSONDecodeError, TypeError):
-                    aliases = tuple(
-                        normalize(part)
-                        for part in re.split(r"[,;]", str(raw_aliases))
-                        if part.strip()
-                    )
-            official = row["name_official"] or ""
-            official_norm = normalize(official)
-            name_norm = row["name_norm"] or official_norm
-            name_core_norm = normalize(row["name_core_norm"] or "") or None
-            # dedup с сохранением порядка: name_norm, официальное, старые названия
-            names = tuple(
-                dict.fromkeys(n for n in (name_norm, official_norm, *aliases) if n)
-            )
-            by_id[row["id"]] = StreetEntity(
-                id=row["id"],
-                entity_type=row["entity_type"] or "street",
-                name_official=official,
-                name_norm=name_norm,
-                name_core_norm=name_core_norm,
-                street_type=row["street_type"],
-                city_id=row["city_id"],
-                district_id=row["district_id"],
-                province_id=row["province_id"],
-                aliases=aliases,
-                names=names,
-            )
+        by_id = {row["id"]: self._entity_from_row(row) for row in rows}
         # Сохраняем порядок релевантности из FTS.
         return [by_id[i] for i in ids if i in by_id]
+
+    def _entity_from_row(self, row: sqlite3.Row) -> StreetEntity:
+        raw_aliases = row["aliases"]
+        aliases: tuple[str, ...] = ()
+        if raw_aliases:
+            try:
+                parsed = json.loads(raw_aliases)
+                if isinstance(parsed, list):
+                    aliases = tuple(
+                        normalize(str(item)) for item in parsed if str(item).strip()
+                    )
+            except (json.JSONDecodeError, TypeError):
+                aliases = tuple(
+                    normalize(part)
+                    for part in re.split(r"[,;]", str(raw_aliases))
+                    if part.strip()
+                )
+        official = row["name_official"] or ""
+        official_norm = normalize(official)
+        name_norm = row["name_norm"] or official_norm
+        name_core_norm = normalize(row["name_core_norm"] or "") or None
+        # dedup с сохранением порядка: name_norm, официальное, старые названия
+        names = tuple(
+            dict.fromkeys(n for n in (name_norm, official_norm, *aliases) if n)
+        )
+        return StreetEntity(
+            id=row["id"],
+            entity_type=row["entity_type"] or "street",
+            name_official=official,
+            name_norm=name_norm,
+            name_core_norm=name_core_norm,
+            street_type=row["street_type"],
+            city_id=row["city_id"],
+            district_id=row["district_id"],
+            province_id=row["province_id"],
+            aliases=aliases,
+            names=names,
+        )
 
     # -- геокодинг: поиск улиц по точному имени ---------------------------- #
 
@@ -601,13 +639,76 @@ class SQLiteAddressRepository:
 
         Нужен для геокодинга: парсер может выбрать не тот дубль улицы, а
         дому нужен именно `street_id`, к которому привязаны координаты.
-        Точное решение принимает вызывающий код по `name_core_norm`/алиасам.
+
+        Дубли в БД могут отличаться написанием: «Тұран даңғылы» (казахская ұ)
+        и «проспект Туран» (русское у). Поэтому после точного SQL-запроса
+        добираем кандидатов через FTS с `fold_kazakh`, а для баз без FTS —
+        широким сканом по городу с фильтрацией в Python. Нельзя полагаться
+        только на `LIKE` по кириллице: он регистрозависим и не сводит ұ → у.
         """
-        core_norm = core_norm or ""
-        name_norm = name_norm or core_norm
+        core_norm = normalize(core_norm or "")
+        name_norm = normalize(name_norm or "") or core_norm
         if not core_norm and not name_norm:
             return []
 
+        fetch_limit = max(40, limit * 4)
+        conn = self._connect()
+
+        # 1. Точное совпадение по name_norm / name_core_norm / алиасам.
+        exact = self._resolve_streets_exact(
+            conn, core_norm, name_norm, city_id, fetch_limit
+        )
+        collected: dict[int, StreetEntity] = {entity.id: entity for entity in exact}
+
+        # 2. FTS-поиск с fold_kazakh: находит «Тұран даңғылы» по запросу
+        #    «туран» и наоборот. search_streets уже умеет fold и OR-запросы.
+        tokens = list(
+            dict.fromkeys(
+                token
+                for token in (
+                    core_norm,
+                    name_norm,
+                    fold_kazakh(core_norm),
+                    fold_kazakh(name_norm),
+                )
+                if token
+            )
+        )
+        for entity in self.search_streets(
+            tokens,
+            city_ids=[city_id] if city_id is not None else None,
+            limit=fetch_limit,
+        ):
+            collected.setdefault(entity.id, entity)
+
+        matched = [
+            entity
+            for entity in collected.values()
+            if _street_matches_query(entity, core_norm, name_norm)
+        ]
+
+        # 3. База без FTS или неполный/устаревший FTS-индекс: широкий скан
+        #    по городу и сравнение в Python (normalize + fold_kazakh).
+        if not self._has_fts or not matched:
+            known = set(collected)
+            for entity in self._scan_streets(conn, city_id):
+                if entity.id in known:
+                    continue
+                if _street_matches_query(entity, core_norm, name_norm):
+                    known.add(entity.id)
+                    matched.append(entity)
+
+        return matched[:limit]
+
+    def _resolve_streets_exact(
+        self,
+        conn: sqlite3.Connection,
+        core_norm: str,
+        name_norm: str,
+        city_id: int | None,
+        fetch_limit: int,
+    ) -> list[StreetEntity]:
+        """Быстрый точный/LIKE-запрос (может не найти казахские дубли)."""
         name_conditions: list[str] = ["name_norm = ?", "name_norm LIKE ?"]
         name_params: list[object] = [name_norm, f"%{core_norm}%"]
         if self._has_core_norm:
@@ -622,8 +723,6 @@ class SQLiteAddressRepository:
             where = "city_id = ? AND " + where
             params.insert(0, city_id)
 
-        # Берём с запасом: финальный выбор делается после проверки алиасов.
-        fetch_limit = max(40, limit * 4)
         if self._has_core_norm:
             order = (
                 " ORDER BY CASE WHEN name_norm = ? THEN 0 "
@@ -644,14 +743,32 @@ class SQLiteAddressRepository:
             + f" LIMIT {int(fetch_limit)}"
         )
         try:
-            conn = self._connect()
             ids = [row["id"] for row in conn.execute(sql, params)]
-            if not ids:
-                return []
-            return self._fetch_entities(conn, ids)[:limit]
+            return self._fetch_entities(conn, ids)
         except sqlite3.Error as exc:
             logger.warning("Ошибка поиска улицы в БД (%s): %s", self.db_path, exc)
             return []
+
+    def _scan_streets(
+        self, conn: sqlite3.Connection, city_id: int | None
+    ) -> list[StreetEntity]:
+        """Все улицы города для Python-фильтрации (fallback без FTS)."""
+        core_expr = "name_core_norm" if self._has_core_norm else "NULL AS name_core_norm"
+        sql = (
+            "SELECT id, city_id, district_id, province_id, entity_type, street_type,"
+            f" name_official, name_norm, {core_expr}, aliases"
+            " FROM streets_and_areas"
+        )
+        params: list[object] = []
+        if city_id is not None:
+            sql += " WHERE city_id = ?"
+            params.append(city_id)
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.Error as exc:
+            logger.warning("Ошибка сканирования улиц в БД (%s): %s", self.db_path, exc)
+            return []
+        return [self._entity_from_row(row) for row in rows]
 
     # -- геокодинг: дома и центроиды --------------------------------------- #
 
