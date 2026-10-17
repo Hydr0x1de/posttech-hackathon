@@ -9,6 +9,12 @@ On a clean clone `backend/entrypoint.sh` downloads it automatically into the
 `address_data` Docker volume at `/data/address_base.db` before FastAPI starts.
 No manual step is required.
 
+Primary source: GitHub Release asset above.
+Fallback mirror: https://posttech_db.hydr0x1de.xyz/address_base.db
+
+The mirror is used automatically if GitHub is unavailable. Downloads use
+`curl -L`, so an HTTP mirror URL that redirects to HTTPS works too.
+
 If a local file exists at `backend/data/address_base.db`, it is mounted
 read-only at `/seed/address_base.db` and used as a seed instead of downloading.
 The API itself always reads the writable volume path (`/data/address_base.db`)

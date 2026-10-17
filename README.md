@@ -153,7 +153,9 @@ docker compose up -d --build
 2. если файла нет — использует локальный seed `backend/data/address_base.db`, если он есть;
 3. иначе скачивает релизный артефакт
    [`v1.0/address_base.db`](https://github.com/Hydr0x1de/posttech-hackathon/releases/download/v1.0/address_base.db)
-   через `curl` и проверяет SQLite-заголовок.
+   через `curl -L` (с переходом по редиректам) и проверяет SQLite-заголовок;
+4. если GitHub недоступен — повторяет загрузку с резервного зеркала
+   [`posttech_db.hydr0x1de.xyz/address_base.db`](https://posttech_db.hydr0x1de.xyz/address_base.db).
 
 Дальше БД живёт в Docker volume `address_data` и переживает рестарты.
 Повторно скачать её можно командой `docker compose down -v && docker compose up -d --build`.
@@ -447,7 +449,8 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
 | `ADDRESS_DB_PATH` | `data/address_base.db` (в Docker — `/data/address_base.db`) | путь к базе адресов |
-| `ADDRESS_DB_URL` | GitHub Release `v1.0/address_base.db` | откуда скачать БД при первом старте |
+| `ADDRESS_DB_URL` | GitHub Release `v1.0/address_base.db` | основной источник БД |
+| `ADDRESS_DB_FALLBACK_URL` | `https://posttech_db.hydr0x1de.xyz/address_base.db` | резервное зеркало, если GitHub недоступен |
 | `ADDRESS_DB_SEED` | `/seed/address_base.db` | локальный seed, если он есть |
 | `MAX_BATCH_SIZE` | `5000` | максимум записей в одном запросе |
 | `PARSER_WORKERS` | `4` | потоки обработки пакета |
@@ -464,8 +467,10 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
   отклоняет файлы больше 100 MB. Артефакт опубликован в
   [GitHub Release v1.0](https://github.com/Hydr0x1de/posttech-hackathon/releases/tag/v1.0).
 - `backend/entrypoint.sh` перед запуском FastAPI проверяет `/data/address_base.db`,
-  копирует локальный seed из `/seed` или скачивает релиз через `curl`,
-  проверяет заголовок `SQLite format 3` и только затем запускает `uvicorn`.
+  копирует локальный seed из `/seed` или скачивает релиз через `curl -L`
+  (редиректы HTTP→HTTPS поддерживаются), при недоступности GitHub переключается
+  на зеркало `posttech_db.hydr0x1de.xyz`, проверяет заголовок `SQLite format 3`
+  и только затем запускает `uvicorn`.
 - В `docker-compose.yml` каталог `backend/data` монтируется в API-контейнер
   как `/seed:ro`, а БД хранится в named volume `address_data:/data`.
 - Сервис `web` собирается из `jana-post-front`, слушает `8080` и проксирует
