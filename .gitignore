@@ -1,0 +1,59 @@
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# test / lint / type-check caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# packaging
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+
+# --- OS / editors -----------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# --- Local runtime junk -----------------------------------------------------
+*.log
+logs/
+tmp/
+.cache/
+*.tmp
+*.bak
+*.dump
+
+# SQLite sidecar files (WAL/SHM/journal)
+*.db-wal
+*.db-shm
+*.db-journal
+
+# The production DB is committed on purpose: the Docker image must run offline.
+backend/data/*.db
+!backend/data/address_base.db
+
+# Raw geo dumps are not committed (the ready address_base.db is).
+*.pbf
+base-builder/*.db
+base-builder/*.json

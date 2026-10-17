@@ -1,0 +1,31 @@
+# VCS / local environments
+.git
+.gitignore
+.venv
+venv
+env
+
+# Python caches and test artifacts
+__pycache__
+*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+.coverage.*
+htmlcov
+
+# Not needed inside the production image
+tests
+scripts
+dev
+*.md
+!README.md
+
+# The DB is provided by the docker-compose volume, not baked into the image
+data/*
+!data/.gitkeep
+
+# Logs and temp files
+*.log
+tmp

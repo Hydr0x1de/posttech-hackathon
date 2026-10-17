@@ -1,0 +1,898 @@
+"""Ядро разбора адреса: предобработка -> tail parser -> FTS5 lookup -> обогащение.
+
+Порядок строго по ТЗ:
+    1. предобработка и разделение склеек;
+    2. вырезание деталей (Tail Parser) с фиксацией спанов;
+    3. запрос к БД (FTS5) по остатку строки;
+    4. позиционный фоллбэк для «голых» чисел.
+
+Значения `street_name`, `living_area`, `landmark`, `house`, `apartment`,
+`entrance`, `floor` — всегда слайсы исходной строки: опечатки и падежи
+пользователя не исправляются.
+"""
+
+from __future__ import annotations
+
+import bisect
+import difflib
+import logging
+import re
+from collections.abc import Callable, Iterable, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
+from functools import lru_cache
+
+from app.core import vocabulary as vocab
+from app.core.tail_parser import GluedHint, TailSpans, parse_tail
+from app.core.text import (
+    Token,
+    WorkText,
+    fold_kazakh,
+    iter_tokens,
+    normalize,
+    slice_original,
+    tokenize,
+)
+from app.repositories.repository import (
+    CLASSIFIER_STOP,
+    REPUBLICAN_CITIES,
+    AddressRepository,
+    Classifier,
+    ClassifierIndex,
+    NullAddressRepository,
+    StreetEntity,
+    classifier_keys,
+)
+
+logger = logging.getLogger(__name__)
+
+# Типы, которые по своей природе являются жилым массивом (fallback без БД).
+LIVING_AREA_TYPES = frozenset({"микрорайон", "квартал"})
+
+# Минимальная похожесть названия, при которой сущность из FTS считается
+# найденной. Слабее — Regex-fallback без обогащения (ТЗ: без случайных регионов).
+MIN_ENTITY_SIMILARITY = 0.8
+# Порог для справочников: стемминг сводит "Абая" -> "аба", поэтому одного
+# совпадения ключа мало — проверяем ещё и похожесть самих названий.
+MIN_CLASSIFIER_SIMILARITY = 0.8
+
+_KIND_PRIORITY = {"province": 0, "city": 1, "district": 2}
+_HINT_TO_KIND = {
+    "район": "district", "ауданы": "district", "аудан": "district", "р-н": "district",
+    "рн": "district", "область": "province", "облысы": "province", "обл": "province",
+    "город": "city", "қаласы": "city", "каласы": "city", "г": "city",
+}
+
+
+# --------------------------------------------------------------------------- #
+# Результат
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(slots=True)
+class ParsedAddress:
+    """Одна размеченная запись."""
+
+    id: str
+    raw_address: str
+    province: str | None = None
+    city: str | None = None
+    district: str | None = None
+    street_type: str | None = None
+    street_name: str | None = None
+    living_area: str | None = None
+    landmark: str | None = None
+    house: str | None = None
+    apartment: str | None = None
+    entrance: str | None = None
+    floor: str | None = None
+    confidence: float = 0.5
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "raw_address": self.raw_address,
+            "province": self.province,
+            "city": self.city,
+            "district": self.district,
+            "street_type": self.street_type,
+            "street_name": self.street_name,
+            "living_area": self.living_area,
+            "landmark": self.landmark,
+            "house": self.house,
+            "apartment": self.apartment,
+            "entrance": self.entrance,
+            "floor": self.floor,
+            "confidence": self.confidence,
+        }
+
+
+# Порядок полей в кэшируемом кортеже.
+_FIELDS = (
+    "province", "city", "district", "street_type", "street_name", "living_area",
+    "landmark", "house", "apartment", "entrance", "floor", "confidence",
+)
+_EMPTY_FIELDS: tuple[object, ...] = (None,) * (len(_FIELDS) - 1) + (0.0,)
+
+
+# --------------------------------------------------------------------------- #
+# Вспомогательные структуры
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(slots=True)
+class _Classification:
+    kind: str
+    item: Classifier
+    start: int  # индекс первого токена (включительно)
+    end: int    # индекс последнего токена + 1
+
+
+@dataclass(slots=True)
+class _CoreResult:
+    province: str | None = None
+    city: str | None = None
+    district: str | None = None
+    street_type: str | None = None
+    street_name: str | None = None
+    living_area: str | None = None
+    confidence: float = 0.5
+    matched: bool = False
+
+
+# --------------------------------------------------------------------------- #
+# Сопоставление классификаторов
+# --------------------------------------------------------------------------- #
+
+_PSEUDO_DISTRICT_RE = re.compile(r"(?:^|\s)г\s*а$")
+
+
+def _is_pseudo_district(name: str) -> bool:
+    """"Актобе Г.А" / "Темиртау Г.А" — городская администрация, не район."""
+    return bool(_PSEUDO_DISTRICT_RE.search(normalize(name)))
+
+
+def _hint_kind(tokens: Sequence[Token], end: int) -> str | None:
+    """Служебное слово сразу после названия уточняет тип классификатора."""
+    if end < len(tokens):
+        return _HINT_TO_KIND.get(tokens[end].norm)
+    return None
+
+
+def _classifier_is_similar(window_norm: str, stripped_window: str, item: Classifier) -> bool:
+    """Совпадение по стеммированному ключу подтверждаем похожестью названий.
+
+    Без этого "Абая" (стем "аба") притягивает провинцию "Абай область".
+    """
+    stripped_name = " ".join(t for t in tokenize(item.norm) if t not in CLASSIFIER_STOP)
+    score = _similarity(window_norm, item.norm)
+    if stripped_name and stripped_window:
+        score = max(score, _similarity(stripped_window, stripped_name))
+    return score >= MIN_CLASSIFIER_SIMILARITY
+
+
+def _match_classifiers(tokens: Sequence[Token], index: ClassifierIndex) -> list[_Classification]:
+    """Ищем области/города/районы в тексте адреса (до 4 слов в названии)."""
+    if index.is_empty:
+        return []
+
+    tables = (
+        ("province", index.province_keys),
+        ("city", index.city_keys),
+        ("district", index.district_keys),
+    )
+    candidates: list[tuple[tuple[int, int, int, int], _Classification]] = []
+
+    for start in range(len(tokens)):
+        for size in (4, 3, 2, 1):
+            window = tokens[start:start + size]
+            if len(window) < size:
+                continue
+            window_norm = " ".join(t.norm for t in window)
+            stripped_window = " ".join(
+                t.norm for t in window if t.norm not in CLASSIFIER_STOP
+            )
+            for key in classifier_keys(window_norm):
+                if not key:
+                    continue
+                for kind, table in tables:
+                    for item in table.get(key, ()):
+                        if not _classifier_is_similar(window_norm, stripped_window, item):
+                            continue
+                        # "Мкр Аксай 3а": Аксай — часть названия жилого
+                        # массива, а не город. Тип перед словом однозначно
+                        # говорит, что это топоним, а не классификатор.
+                        if kind == "city" and start > 0 and vocab.STREET_TYPE_RE.fullmatch(
+                            tokens[start - 1].raw
+                        ):
+                            continue
+                        hint = _hint_kind(tokens, start + size)
+                        score = (
+                            1 if hint == kind else 0,
+                            size,
+                            -_KIND_PRIORITY[kind],
+                            -start,
+                        )
+                        candidates.append(
+                            (score, _Classification(kind, item, start, start + size))
+                        )
+
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    chosen: list[_Classification] = []
+    spans: dict[str, set[int]] = {}
+    for _score, candidate in candidates:
+        if candidate.kind in spans:
+            continue
+        # Служебное слово рядом ("область", "район", "город") однозначно
+        # задаёт тип: "Алматинская область" — не район "Алматинский".
+        hint = _hint_kind(tokens, candidate.end)
+        if hint is not None and hint != candidate.kind:
+            continue
+        positions = set(range(candidate.start, candidate.end))
+        # Один и тот же отрезок может быть и городом, и областью ("Алматы"),
+        # но разные типы не должны пересекаться частично.
+        conflict = any(
+            positions & other and positions != other for other in spans.values()
+        )
+        if conflict:
+            continue
+        chosen.append(candidate)
+        spans[candidate.kind] = positions
+        if len(spans) == 3:
+            break
+    return chosen
+
+
+# --------------------------------------------------------------------------- #
+# Похожесть и выбор сущности
+# --------------------------------------------------------------------------- #
+
+
+@lru_cache(maxsize=65_536)
+def _tokens_alike(left: str, right: str) -> bool:
+    """Токены считаются совпавшими с учётом опечаток и словоформ."""
+    if left == right:
+        return True
+    if len(left) >= 3 and len(right) >= 3 and (left.startswith(right) or right.startswith(left)):
+        return True
+    return difflib.SequenceMatcher(None, left, right, autojunk=False).ratio() >= 0.75
+
+
+@lru_cache(maxsize=65_536)
+def _similarity(query: str, name: str) -> float:
+    """Похожесть названия из БД и отрезка адреса.
+
+    Символьная похожесть со штрафом за непокрытые токены названия: лишние
+    слова в названии ("66-й квартал" против "66 квартал") заметно снижают
+    оценку, а опечатка внутри токена ("казибек" / "казыбек") — почти нет.
+    Казахские буквы перед сравнением сводятся к русским (ә->а, қ->к, ...):
+    "Мәңгілік Ел" и "Мангилик ел" — одно название.
+    """
+    if not query or not name:
+        return 0.0
+    query = fold_kazakh(query)
+    name = fold_kazakh(name)
+    if query == name:
+        return 1.0
+    char_ratio = difflib.SequenceMatcher(None, query, name, autojunk=False).ratio()
+    name_tokens = name.split()
+    query_tokens = query.split()
+    if name_tokens and query_tokens:
+        matched = sum(
+            1 for name_token in name_tokens
+            if any(_tokens_alike(name_token, query_token) for query_token in query_tokens)
+        )
+        coverage = matched / len(name_tokens)
+    else:
+        coverage = 0.0
+    return char_ratio * (0.5 + 0.5 * coverage)
+
+
+@dataclass(slots=True)
+class _EntityMatch:
+    """Найденная в БД сущность и точный спан её названия в адресе."""
+
+    entity: StreetEntity
+    start: int
+    end: int
+    score: float
+
+
+def _strip_type_tokens(value: str) -> str:
+    """Убрать базовые слова типа из названия ("улица Абая" -> "абая").
+
+    `name_core_norm` в боевой базе местами всё ещё содержит тип
+    ("улица наримановская", "наримановская улица"), поэтому сравниваем ещё
+    и ядро, полученное срезанием известных типов из полного имени.
+    """
+    tokens = value.split()
+    core = [token for token in tokens if vocab.canonical_street_type(token) is None]
+    return " ".join(core) if core else value
+
+
+@lru_cache(maxsize=32_768)
+def _target_names(candidate: StreetEntity) -> tuple[str, ...]:
+    """Все варианты названия для сопоставления: полные и ядра."""
+    targets: list[str] = []
+    for name in candidate.names:
+        target = normalize(name)
+        if target:
+            targets.append(target)
+    if candidate.name_core_norm:
+        core = normalize(candidate.name_core_norm)
+        if core:
+            targets.append(core)
+    # Ядро, выведенное из полного имени: страхует от "грязного"
+    # name_core_norm, в котором остался тип ("улица ...").
+    for target in list(targets):
+        stripped = _strip_type_tokens(target)
+        if stripped and stripped != target:
+            targets.append(stripped)
+    return tuple(dict.fromkeys(targets))
+
+
+def _best_match_for_entity(
+    name_tokens: Sequence[Token], candidate: StreetEntity
+) -> _EntityMatch | None:
+    """Лучшее окно адреса для одного кандидата (без порога)."""
+    best: _EntityMatch | None = None
+    for target in _target_names(candidate):
+        target_len = len(target.split())
+        sizes = {target_len, max(1, target_len - 1), target_len + 1, target_len + 2}
+        for size in sizes:
+            if size < 1 or size > len(name_tokens):
+                continue
+            for start in range(len(name_tokens) - size + 1):
+                window_text = " ".join(t.norm for t in name_tokens[start:start + size])
+                score = _similarity(window_text, target)
+                start_pos = name_tokens[start].start
+                end_pos = name_tokens[start + size - 1].end
+                # При равной похожести выигрывает более длинный отрезок:
+                # куцый name_norm ("12") не должен отрезать "микрорайон".
+                longer = best is not None and (end_pos - start_pos) > (best.end - best.start)
+                if best is None or score > best.score + 1e-9 or (
+                    abs(score - best.score) <= 1e-9 and longer
+                ):
+                    best = _EntityMatch(
+                        entity=candidate,
+                        start=start_pos,
+                        end=end_pos,
+                        score=score,
+                    )
+    return best
+
+
+def _exact_match(
+    name_tokens: Sequence[Token], candidates: Sequence[StreetEntity]
+) -> _EntityMatch | None:
+    """Быстрый путь: ядро/полное имя точно совпало с названием адреса.
+
+    Точное совпадение (score=1.0) не требует перебора окон и difflib —
+    это заметная часть боевых адресов и главный резерв скорости пакета.
+    """
+    query = fold_kazakh(" ".join(token.norm for token in name_tokens))
+    best: _EntityMatch | None = None
+    start = name_tokens[0].start
+    end = name_tokens[-1].end
+    for candidate in candidates:
+        matched = any(fold_kazakh(target) == query for target in _target_names(candidate))
+        if not matched:
+            continue
+        if best is None:
+            best = _EntityMatch(candidate, start, end, 1.0)
+            continue
+        # При равном score=1.0 предпочитаем сущность с типом улицы и
+        # городом/районом: в БД бывают дубли без street_type.
+        if (
+            int(candidate.street_type is not None),
+            int(candidate.city_id is not None),
+            int(candidate.district_id is not None),
+            int(candidate.province_id is not None),
+        ) > (
+            int(best.entity.street_type is not None),
+            int(best.entity.city_id is not None),
+            int(best.entity.district_id is not None),
+            int(best.entity.province_id is not None),
+        ):
+            best = _EntityMatch(candidate, start, end, 1.0)
+    return best
+
+
+def _match_entity(
+    name_tokens: Sequence[Token], candidates: Sequence[StreetEntity]
+) -> _EntityMatch | None:
+    """Выбрать лучшего кандидата из FTS и локализовать его название в адресе.
+
+    Отрезок адреса сравнивается с каждым вариантом названия (name_norm,
+    name_core_norm, ядро без типа, нормализованное официальное название,
+    старые названия) скользящим окном: так слайс не захватывает посторонние
+    слова, а лишние токены адреса не мешают совпадению.
+
+    Сущность принимается только при `score >= MIN_ENTITY_SIMILARITY`; иначе
+    возвращается None — разбор уходит в Regex-fallback без обогащения
+    регионами/городом (чтобы не приписать случайную область).
+    """
+    if not name_tokens or not candidates:
+        return None
+    exact = _exact_match(name_tokens, candidates)
+    if exact is not None:
+        return exact
+
+    def rank(match: _EntityMatch) -> tuple[float, int, int, int, int, int]:
+        entity = match.entity
+        return (
+            match.score,
+            match.end - match.start,
+            int(entity.street_type is not None),
+            int(entity.city_id is not None),
+            int(entity.district_id is not None),
+            int(entity.province_id is not None),
+        )
+
+    best: _EntityMatch | None = None
+    for candidate in candidates:
+        found = _best_match_for_entity(name_tokens, candidate)
+        if found is None:
+            continue
+        if best is None or rank(found) > rank(best):
+            best = found
+    if best is None or best.score < MIN_ENTITY_SIMILARITY:
+        return None
+    return best
+
+
+def _is_ambiguous_match(
+    name_tokens: Sequence[Token],
+    candidates: Sequence[StreetEntity],
+    best: _EntityMatch,
+) -> bool:
+    """Одно и то же название встречается в нескольких городах почти одинаково.
+
+    Город `None` не считается отдельным городом: такие записи не дают
+    достаточного сигнала для выбора и не должны блокировать уникальный
+    городской вариант.
+    """
+    best_length = best.end - best.start
+    city_ids: set[int] = set()
+    for candidate in candidates:
+        found = _best_match_for_entity(name_tokens, candidate)
+        if found is None or found.score < best.score - 0.05:
+            continue
+        # Совпадение только с коротким ядром ("3а" вместо "Аксай 3а")
+        # не делает название неоднозначным: это менее полный вариант того же
+        # адреса, а не другой город.
+        if (found.end - found.start) < best_length:
+            continue
+        if candidate.city_id is not None:
+            city_ids.add(candidate.city_id)
+    return len(city_ids) > 1
+
+
+# --------------------------------------------------------------------------- #
+# Сервис
+# --------------------------------------------------------------------------- #
+
+
+class AddressParserService:
+    """Разбор адресов с кэшем и параллельной обработкой пакета."""
+
+    def __init__(
+        self,
+        repository_provider: Callable[[], AddressRepository | NullAddressRepository],
+        *,
+        workers: int = 4,
+        cache_size: int = 200_000,
+    ) -> None:
+        self._repository_provider = repository_provider
+        self._workers = max(1, workers)
+        self._parse_fields = lru_cache(maxsize=cache_size)(self._parse_fields_uncached)
+
+    # -- публичный API ----------------------------------------------------- #
+
+    @property
+    def repository(self) -> AddressRepository | NullAddressRepository:
+        return self._repository_provider()
+
+    def parse(self, record_id: str, raw_address: str) -> ParsedAddress:
+        values = self._parse_fields(raw_address or "")
+        return ParsedAddress(
+            id=record_id,
+            raw_address=raw_address or "",
+            **dict(zip(_FIELDS, values, strict=True)),
+        )
+
+    def parse_batch(self, records: Iterable[tuple[str, str]]) -> list[ParsedAddress]:
+        """Пакетная обработка. Порядок записей сохраняется."""
+        items = list(records)
+        if not items:
+            return []
+        if len(items) < 64 or self._workers == 1:
+            return [self.parse(record_id, raw) for record_id, raw in items]
+        with ThreadPoolExecutor(max_workers=self._workers, thread_name_prefix="parser") as pool:
+            return list(pool.map(lambda item: self.parse(*item), items))
+
+    # -- основной конвейер ------------------------------------------------- #
+
+    def _parse_fields_uncached(self, raw_address: str) -> tuple[object, ...]:
+        if not raw_address or not raw_address.strip():
+            return _EMPTY_FIELDS
+
+        work = WorkText(raw_address)
+        hints = self._preprocess(work)
+
+        tail: TailSpans = parse_tail(work, hints)
+
+        repository = self._repository_provider()
+        core = self._parse_core(work, repository, tail.protected, tail)
+
+        return (
+            core.province,
+            core.city,
+            core.district,
+            core.street_type,
+            core.street_name,
+            core.living_area,
+            tail.landmark,
+            tail.house,
+            tail.apartment,
+            tail.entrance,
+            tail.floor,
+            core.confidence,
+        )
+
+    # -- шаг 1: предобработка --------------------------------------------- #
+
+    @staticmethod
+    def _preprocess(work: WorkText) -> list[GluedHint]:
+        """Разлепление слитных написаний вставкой пробелов.
+
+        Смещения исходной строки не ломаются (вставка пробела — единственная
+        разрешённая модификация), а из слитных пар сразу извлекаются подсказки:
+        в "12дом", "4подьезд", "flat191" число однозначно принадлежит
+        ключевому слову.
+        """
+        raw = work.text
+        insertions: list[int] = []
+        # (поле, начало числа, конец числа, начало пары, конец пары)
+        raw_hints: list[tuple[str | None, int, int, int, int]] = []
+
+        for match in vocab.GLUED_NUMBER_KEYWORD_RE.finditer(raw):
+            insertions.append(match.start("kw"))
+            raw_hints.append(
+                (
+                    vocab.field_for_keyword(match.group("kw")),
+                    match.start("num"), match.end("num"),
+                    match.start("num"), match.end("kw"),
+                )
+            )
+        for match in vocab.GLUED_KEYWORD_DIGIT_RE.finditer(raw):
+            insertions.append(match.start("num"))
+            raw_hints.append(
+                (
+                    vocab.field_for_keyword(match.group("kw")),
+                    match.start("num"), match.end("num"),
+                    match.start("kw"), match.end("num"),
+                )
+            )
+        insertions.extend(m.start() for m in vocab.GLUED_DOT_WORD_RE.finditer(raw))
+        insertions.extend(m.start() for m in vocab.GLUED_SLASH_WORD_RE.finditer(raw))
+
+        work.insert_spaces(insertions)
+
+        if not raw_hints:
+            return []
+        ordered = sorted(set(insertions))
+        hints: list[GluedHint] = []
+        for field_name, num_start, num_end, pair_start, pair_end in raw_hints:
+            if not field_name:
+                continue
+            # Перевод смещений исходной строки в координаты рабочей копии.
+            start = pair_start + bisect.bisect_right(ordered, pair_start)
+            end = pair_end + bisect.bisect_left(ordered, pair_end)
+            hints.append(
+                GluedHint(
+                    field=field_name,
+                    value=slice_original(raw, num_start, num_end),
+                    start=start,
+                    end=end,
+                )
+            )
+        return hints
+
+    # -- шаги 3-4: адресное ядро ------------------------------------------ #
+
+    def _parse_core(
+        self,
+        work: WorkText,
+        repository: AddressRepository | NullAddressRepository,
+        protected: Sequence[tuple[int, int]] = (),
+        tail: TailSpans | None = None,
+    ) -> _CoreResult:
+        tokens = list(iter_tokens(work.text))
+        index = repository.classifiers()
+        result = _CoreResult()
+
+        # 1. Классификаторы: область / город / район.
+        classifications = _match_classifiers(tokens, index)
+        used: set[int] = set()
+        city_norms = {
+            normalize(item.item.name)
+            for item in classifications
+            if item.kind == "city"
+        }
+        filtered: list[_Classification] = []
+        for item in classifications:
+            if item.kind == "district" and (
+                normalize(item.item.name) in city_norms
+                or _is_pseudo_district(item.item.name)
+            ):
+                # В Казахстане есть районы, названные как города ("Алматы",
+                # "Тараз"), и псевдорайоны "X Г.А". Это не район адреса.
+                used |= set(range(item.start, item.end))
+                continue
+            filtered.append(item)
+        classifications = filtered
+        for item in classifications:
+            used |= set(range(item.start, item.end))
+            setattr(result, item.kind, item.item.name)
+
+        # 2. Тип улицы/жилого массива — базовое слово.
+        type_positions: dict[int, str] = {}
+        for position, token in enumerate(tokens):
+            if position in used:
+                continue
+            if vocab.STREET_TYPE_RE.fullmatch(token.raw):
+                canonical = vocab.canonical_street_type(token.raw) or token.norm
+                type_positions[position] = canonical
+                if result.street_type is None:
+                    result.street_type = canonical
+
+        protected_positions = {
+            position
+            for position, token in enumerate(tokens)
+            if any(token.start < end and start < token.end for start, end in protected)
+        }
+
+        # 3. Число после названия, но не в конце строки ("Сейфуллина 33 (Астана)"):
+        #    за ним уже нет неразобранных слов — значит это дом.
+        house_positions: set[int] = set()
+        if tail is not None and tail.house is None:
+            for position, token in enumerate(tokens):
+                if position in used or position in protected_positions:
+                    continue
+                if not vocab.BARE_NUMBER_RE.fullmatch(token.raw):
+                    continue
+                if any(p not in used for p in range(position + 1, len(tokens))):
+                    continue
+                value = work.original_slice(token.start, token.end)
+                if value:
+                    tail.house = value
+                    house_positions.add(position)
+                    work.mask(token.start, token.end)
+                    break
+
+        # 4. Значимые токены остатка строки (кандидат в название).
+        phrase: list[tuple[int, Token]] = []
+        for position, token in enumerate(tokens):
+            if position in used or position in house_positions:
+                continue
+            if position in type_positions:
+                phrase.append((position, token))
+                continue
+            if token.norm in vocab.STOP_WORDS or token.norm in CLASSIFIER_STOP:
+                continue
+            phrase.append((position, token))
+
+        if not phrase:
+            result.confidence = self._confidence(repository, result, 0.0)
+            return result
+
+        # 5. Запрос в БД по остатку строки.
+        #    Казахские токены НЕ отсекаются: "Мәңгілік Ел", "Қабанбай батыр"
+        #    должны попадать в FTS как есть (иначе от названия остаётся "Ел").
+        query_tokens = [
+            token.norm
+            for position, token in phrase
+            if position not in type_positions or type_positions[position] in LIVING_AREA_TYPES
+        ]
+        name_tokens = [
+            token
+            for position, token in phrase
+            if position not in type_positions or type_positions[position] in LIVING_AREA_TYPES
+        ] or [token for _, token in phrase]
+        name_span = (name_tokens[0].start, name_tokens[-1].end)
+
+        match: _EntityMatch | None = None
+        candidates: list[StreetEntity] = []
+        ratio = 0.0
+        level = "none"
+        preferred_type: str | None = None
+        if result.street_type in LIVING_AREA_TYPES:
+            preferred_type = "living_area"
+        elif result.street_type is not None:
+            preferred_type = "street"
+
+        if query_tokens:
+            match, level, candidates = self._lookup_streets(
+                repository, query_tokens, name_tokens, classifications, preferred_type
+            )
+            if match is not None:
+                ratio = match.score
+
+        city_in_text = any(c.kind == "city" for c in classifications)
+        explicit_geo = bool(result.province or result.city or result.district)
+        ambiguous = False
+        weak = False
+        trust_parents = True
+        if match is not None:
+            if city_in_text:
+                # Город указан пользователем. Если в этом городе улицы нет,
+                # имя всё равно может быть верным — не подмешиваем родителей
+                # из чужого города, но и не штрафуем уверенность.
+                trust_parents = level != "none"
+            else:
+                ambiguous = _is_ambiguous_match(name_tokens, candidates, match)
+                trust_parents = not ambiguous
+                # Без города/области в тексте неоднозначную улицу не обогащаем
+                # регионами и отдаём низкую уверенность (ТЗ, P0-3.2).
+                weak = ambiguous and not explicit_geo
+
+        # 6. Заполнение названия и обогащение из БД.
+        if match is not None:
+            result.matched = True
+            self._apply_entity(
+                result,
+                match.entity,
+                index,
+                work.original_slice(match.start, match.end),
+                trusted=trust_parents,
+            )
+        else:
+            name_slice = work.original_slice(*name_span)
+            if result.street_type in LIVING_AREA_TYPES:
+                result.living_area = name_slice
+            else:
+                result.street_name = name_slice
+
+        if weak:
+            # Никаких гео-догадок: только явный текст адреса.
+            result.province = result.city = result.district = None
+
+        self._fill_province_from_city(result, index)
+        result.confidence = self._confidence(repository, result, ratio, weak=weak)
+        return result
+
+    @staticmethod
+    def _lookup_streets(
+        repository: AddressRepository | NullAddressRepository,
+        query_tokens: Sequence[str],
+        name_tokens: Sequence[Token],
+        classifications: Sequence[_Classification],
+        preferred_type: str | None = None,
+    ) -> tuple[_EntityMatch | None, str, list[StreetEntity]]:
+        """Поиск с постепенным ослаблением фильтров и валидацией кандидатов.
+
+        Возвращает (совпадение, уровень фильтра, кандидаты). Уровень фильтра:
+        `city_district`, `city`, `district` или `none`.
+
+        Важно: непустой ответ FTS/OR ещё не означает совпадение. Каждый
+        уровень фильтров должен пройти `_match_entity` (порог 0.8), иначе
+        идём дальше и снимаем фильтр города/района.
+        """
+        city_ids = [c.item.id for c in classifications if c.kind == "city"] or None
+        district_ids = [c.item.id for c in classifications if c.kind == "district"] or None
+        attempts: list[tuple[dict[str, list[int] | None], str]] = []
+        possible = [
+            (city_ids, district_ids, "city_district"),
+            (city_ids, None, "city"),
+        ]
+        if district_ids:
+            possible.append((None, district_ids, "district"))
+        possible.append((None, None, "none"))
+        for city, district, level in possible:
+            filters = {"city_ids": city, "district_ids": district}
+            if all(item[0] != filters for item in attempts):
+                attempts.append((filters, level))
+
+        for filters, level in attempts:
+            found = repository.search_streets(query_tokens, **filters)  # type: ignore[arg-type]
+            if not found:
+                continue
+            if preferred_type is not None:
+                # "66 квартал" не должен матчиться на улицу "66", а
+                # "Мкр Аксай 3а" — на улицу "Аксай".
+                typed = [item for item in found if item.entity_type == preferred_type]
+                if typed:
+                    found = typed
+            match = _match_entity(name_tokens, found)
+            if match is not None:
+                return match, level, found
+        return None, "none", []
+
+    @staticmethod
+    def _apply_entity(
+        result: _CoreResult,
+        entity: StreetEntity,
+        index: ClassifierIndex,
+        name_slice: str,
+        *,
+        trusted: bool = True,
+    ) -> None:
+        """Заполнение полей по найденной сущности БД (название — слайс строки)."""
+        if name_slice:
+            if entity.entity_type == "living_area":
+                result.living_area = name_slice
+            else:
+                result.street_name = name_slice
+
+        # Тип из БД имеет приоритет над регуляркой (ТЗ, шаг 3).
+        db_type = vocab.canonical_street_type(entity.street_type) or entity.street_type
+        if db_type:
+            result.street_type = db_type
+
+        if not trusted:
+            return
+
+        # Обогащение родительскими сущностями.
+        if result.city is None and entity.city_id is not None:
+            city = index.city_by_id.get(entity.city_id)
+            if city:
+                result.city = city.name
+        if result.district is None and entity.district_id is not None:
+            district = index.district_by_id.get(entity.district_id)
+            if district and not _is_pseudo_district(district.name):
+                # Район не должен дублировать город ("Алматы" / "Тараз").
+                if result.city is None or normalize(district.name) != normalize(result.city):
+                    result.district = district.name
+        if result.province is None and entity.province_id is not None:
+            province = index.province_by_id.get(entity.province_id)
+            if province:
+                result.province = province.name
+
+    @staticmethod
+    def _fill_province_from_city(result: _CoreResult, index: ClassifierIndex) -> None:
+        """Авто-обогащение province по найденному городу.
+
+        Сначала справочник `cities` (province_id), затем города республиканского
+        значения, у которых провинция совпадает с городом (ТЗ, п.3).
+        """
+        if result.province is not None or not result.city:
+            return
+        city = index.city_by_norm.get(normalize(result.city))
+        if city is not None and city.parent_id is not None:
+            province = index.province_by_id.get(city.parent_id)
+            if province is not None:
+                result.province = province.name
+                return
+        if result.city.lower() in REPUBLICAN_CITIES:
+            result.province = result.city
+
+    @staticmethod
+    def _confidence(
+        repository: AddressRepository | NullAddressRepository,
+        result: _CoreResult,
+        ratio: float,
+        weak: bool = False,
+    ) -> float:
+        if not repository.db_loaded:
+            # БД отсутствует: базовый регулярный разбор, строго 0.5.
+            return 0.5
+        resolved = sum(
+            1 for value in (result.province, result.city, result.district) if value
+        )
+        if weak:
+            # Неоднозначная улица без города в тексте: 0.5…0.6 (ТЗ, P0-3.2).
+            return round(min(0.6, 0.5 + 0.02 * resolved), 2)
+        if result.matched:
+            if ratio >= 0.95:
+                base = 0.9
+            elif ratio >= 0.8:
+                base = 0.8
+            else:
+                base = 0.62
+        else:
+            base = 0.5
+        return round(min(0.99, base + 0.03 * resolved), 2)
+
+
+__all__ = ["AddressParserService", "ParsedAddress"]

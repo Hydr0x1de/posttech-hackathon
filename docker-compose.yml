@@ -1,0 +1,39 @@
+name: jana-address
+
+services:
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: jana-address-api:1.0.0
+    container_name: jana-address-api
+    ports:
+      - "8000:8000"
+    environment:
+      # Production DB is mounted from the repository (247 MB, committed on purpose).
+      ADDRESS_DB_PATH: /data/address_base.db
+      MAX_BATCH_SIZE: "5000"
+      PARSER_WORKERS: "4"
+      PARSER_CACHE_SIZE: "200000"
+      DB_RELOAD_INTERVAL: "5"
+      LOG_LEVEL: INFO
+    volumes:
+      # Read-only mount: the parser never writes to the address base.
+      - ./backend/data:/data:ro
+    healthcheck:
+      # Healthy only when the API responds AND the address base is loaded.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import json, sys, urllib.request
+          payload = json.load(
+              urllib.request.urlopen("http://127.0.0.1:8000/api/v1/health", timeout=3)
+          )
+          sys.exit(0 if payload.get("status") == "ok" and payload.get("db_loaded") is True else 1)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
