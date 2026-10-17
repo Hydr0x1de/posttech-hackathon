@@ -1,14 +1,37 @@
 import { highlightRanges } from '../../address/records';
 
-export default function RawAddress({ record, activeKey }) {
+function words(text, prefix) {
+  return text.split(/(\s+)/).map((part, i) =>
+    !part || /^\s+$/.test(part) ? (
+      part
+    ) : (
+      <span key={`${prefix}-${i}`} className="raw__w" data-flip="word">
+        {part}
+      </span>
+    )
+  );
+}
+
+export default function RawAddress({ record, activeKey, litKeys, rawRef }) {
   const raw = record.raw_address;
-  const range = activeKey ? highlightRanges(record).find((r) => r.key === activeKey) : null;
-  if (!range) return <p className="raw">{raw}</p>;
+  const parts = [];
+  let pos = 0;
+  for (const range of highlightRanges(record)) {
+    if (range.start > pos) parts.push(...words(raw.slice(pos, range.start), pos));
+    const active = range.key === activeKey ? ' raw__frag--active' : '';
+    const lit = litKeys?.has(range.key) ? ' raw__frag--lit' : '';
+    parts.push(
+      <span key={range.key} data-key={range.key} className={`raw__frag${active}${lit}`}>
+        {words(raw.slice(range.start, range.end), range.start)}
+      </span>
+    );
+    pos = range.end;
+  }
+  parts.push(...words(raw.slice(pos), pos));
+
   return (
-    <p className="raw">
-      {raw.slice(0, range.start)}
-      <mark>{raw.slice(range.start, range.end)}</mark>
-      {raw.slice(range.end)}
+    <p ref={rawRef} className="raw">
+      {parts}
     </p>
   );
 }

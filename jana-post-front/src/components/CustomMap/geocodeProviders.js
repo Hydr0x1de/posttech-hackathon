@@ -34,8 +34,6 @@ export function createNominatimProvider({ language = 'ru', countryCodes = '' } =
       return normalizeNominatimItem(data);
     },
 
-    // Дом по номеру внутри границ найденного места: в OSM он бывает подписан
-    // другим микрорайоном («59, Аксай-3» стоит внутри «Аксай 3А»)
     async findHouse(house, place, { signal } = {}) {
       const box = place?.raw?.boundingbox?.map(Number);
       if (!house || !box || box.some((n) => !Number.isFinite(n))) return null;
@@ -76,7 +74,6 @@ export function createNominatimProvider({ language = 'ru', countryCodes = '' } =
   };
 }
 
-// Публичные серверы Overpass часто отвечают 429/502 — пробуем зеркала по очереди
 const OVERPASS_ENDPOINTS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',

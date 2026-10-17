@@ -121,12 +121,10 @@ export function mapQueries(record) {
     add([type, name], false, streetMatch);
     if (/\s/.test(name)) add([name.replace(/\s+/g, '-')], false, streetMatch);
   }
-  // Мкр / ЖК: в OSM дома микрорайонов подписаны без улицы — «Аксай-4, 10»
   const area = record.living_area;
   if (area) {
     const areaMatch = [...localityMatch, ...tokens(area)];
     const dashed = area.replace(/\s+(?=\d)/g, '-');
-    // house — если текстом дом не найдётся, ищем его по номеру внутри границ микрорайона
     const extra = !name && house ? { house } : undefined;
     if (extra) {
       if (dashed !== area) add([dashed, house], true, areaMatch, extra);

@@ -43,6 +43,7 @@ export default function CustomMap({
   focusPoint,
   focusQueries,
   onAddressChange,
+  searchable = true,
 }) {
   const geo = useGeocoder(geocoder);
 
@@ -257,7 +258,6 @@ export default function CustomMap({
           if (requestId !== reverseIdRef.current) return;
           const matching = results.filter((place) => fits(place, candidates[i].match));
           let first = matching.find((place) => place.normalized?.house) || matching[0];
-          // Нашли место без дома — сначала доберём остальные точные варианты написания
           if (candidates[i].exact && !first?.normalized?.house) {
             if (first) approx ??= first;
             if (candidates[i + 1]?.exact || !approx) continue;
@@ -298,6 +298,19 @@ export default function CustomMap({
 
     return () => controller.abort();
   }, [focusKey, focusLat, geocoder]);
+
+  const hasFocus = Number.isFinite(focusLat) || focusKey !== null;
+
+  useEffect(() => {
+    if (!hasFocus) return undefined;
+    return () => {
+      reverseIdRef.current += 1;
+      pointRef.current = null;
+      engineRef.current?.clearMarker();
+      setResolving(false);
+      setSelected(null);
+    };
+  }, [hasFocus]);
 
   const handleSearchKeyDown = (e) => {
     if (e.key === 'Enter') {
@@ -396,66 +409,68 @@ export default function CustomMap({
         )}
       </div>
 
-      <div className="cm-search">
-        <div className="cm-search__field">
-          <svg className="cm-search__icon" width="18" height="18" viewBox="0 0 24 24" fill="none">
-            <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
-            <path d="M20 20L16.5 16.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-          </svg>
-          <input
-            value={geo.query}
-            onChange={(e) => {
-              geo.setQuery(e.target.value);
-              setSuggestOpen(true);
-            }}
-            onFocus={() => setSuggestOpen(true)}
-            onBlur={() => setSuggestOpen(false)}
-            onKeyDown={handleSearchKeyDown}
-            placeholder="Введите адрес, город или ориентир"
-            autoComplete="off"
-          />
-          {geo.loading && <span className="cm-spinner cm-spinner--small" />}
-          {geo.query && !geo.loading && (
-            <button
-              type="button"
-              className="cm-search__clear"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={geo.clear}
-              aria-label="Очистить"
-            >
-              ×
-            </button>
+      {searchable && (
+        <div className="cm-search">
+          <div className="cm-search__field">
+            <svg className="cm-search__icon" width="18" height="18" viewBox="0 0 24 24" fill="none">
+              <circle cx="11" cy="11" r="7" stroke="currentColor" strokeWidth="2" />
+              <path d="M20 20L16.5 16.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+            <input
+              value={geo.query}
+              onChange={(e) => {
+                geo.setQuery(e.target.value);
+                setSuggestOpen(true);
+              }}
+              onFocus={() => setSuggestOpen(true)}
+              onBlur={() => setSuggestOpen(false)}
+              onKeyDown={handleSearchKeyDown}
+              placeholder="Введите адрес, город или ориентир"
+              autoComplete="off"
+            />
+            {geo.loading && <span className="cm-spinner cm-spinner--small" />}
+            {geo.query && !geo.loading && (
+              <button
+                type="button"
+                className="cm-search__clear"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={geo.clear}
+                aria-label="Очистить"
+              >
+                ×
+              </button>
+            )}
+          </div>
+
+          {showSuggestions && (
+            <div className="cm-suggestions">
+              {geo.loading && geo.suggestions.length === 0 && (
+                <div className="cm-suggestions__hint">Ищем адрес…</div>
+              )}
+              {!geo.loading && geo.error && (
+                <div className="cm-suggestions__hint">Не удалось выполнить поиск</div>
+              )}
+              {!geo.loading && !geo.error && geo.suggestions.length === 0 && (
+                <div className="cm-suggestions__hint">Ничего не нашлось</div>
+              )}
+              {geo.suggestions.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  className="cm-suggestions__item"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => handleSelectSuggestion(s)}
+                >
+                  <span className="cm-suggestions__title">{formatAddress(s)}</span>
+                  <span className="cm-suggestions__subtitle">{formatPlaceMeta(s.normalized)}</span>
+                </button>
+              ))}
+            </div>
           )}
         </div>
+      )}
 
-        {showSuggestions && (
-          <div className="cm-suggestions">
-            {geo.loading && geo.suggestions.length === 0 && (
-              <div className="cm-suggestions__hint">Ищем адрес…</div>
-            )}
-            {!geo.loading && geo.error && (
-              <div className="cm-suggestions__hint">Не удалось выполнить поиск</div>
-            )}
-            {!geo.loading && !geo.error && geo.suggestions.length === 0 && (
-              <div className="cm-suggestions__hint">Ничего не нашлось</div>
-            )}
-            {geo.suggestions.map((s) => (
-              <button
-                key={s.id}
-                type="button"
-                className="cm-suggestions__item"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => handleSelectSuggestion(s)}
-              >
-                <span className="cm-suggestions__title">{formatAddress(s)}</span>
-                <span className="cm-suggestions__subtitle">{formatPlaceMeta(s.normalized)}</span>
-              </button>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {selected && (
+      {selected && (resolving || selected.label || selected.normalized) && (
         <div className="cm-address-card">
           {resolving ? (
             <span className="cm-address-card__hint">Определяю адрес…</span>

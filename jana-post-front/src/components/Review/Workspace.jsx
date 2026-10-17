@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_THRESHOLD, FIELDS } from '../../address/fields';
 import { mapQueries } from '../../address/records';
 import CustomMap from '../CustomMap/CustomMap';
@@ -40,6 +40,7 @@ export default function Workspace({ records, fileName, theme, onToggleTheme, onS
   const [filter, setFilter] = useState('all');
   const [query, setQuery] = useState('');
   const [openId, setOpenId] = useState(null);
+  const [openOrigin, setOpenOrigin] = useState(null);
   const [limit, setLimit] = useState(PAGE);
   const [tipOpen, setTipOpen] = useState(readTipOpen);
 
@@ -77,21 +78,27 @@ export default function Workspace({ records, fileName, theme, onToggleTheme, onS
     return () => observer.disconnect();
   }, [shown.length, visible.length, open]);
 
+  const openRecord = useCallback((id, origin = null) => {
+    setOpenOrigin(origin);
+    setOpenId(id);
+  }, []);
+
   const handleSave = (values) => {
     const index = visible.findIndex((r) => r.id === open.id);
     const next = visible[index + 1] ?? null;
     onSave(open.id, values);
-    setOpenId(next?.id ?? null);
+    openRecord(next?.id ?? null);
   };
 
   const hasCoords = open && Number.isFinite(open.lat) && Number.isFinite(open.lng);
 
   return (
-    <div className="workspace">
+    <div className={`workspace${open ? ' workspace--editing' : ''}`}>
       <div className="workspace__map">
         <CustomMap
           key={theme}
           geocoder={geocoder}
+          searchable={false}
           initialCenter={KAZAKHSTAN}
           initialZoom={5}
           defaultStyleId={theme === 'dark' ? 'carto-dark' : 'carto-voyager'}
@@ -101,94 +108,92 @@ export default function Workspace({ records, fileName, theme, onToggleTheme, onS
         />
       </div>
 
-      <aside className="panel">
-        {open ? (
-          <RecordEditor key={open.id} record={open} onBack={() => setOpenId(null)} onSave={handleSave} />
-        ) : (
-          <>
-            <section className="pblock pblock--head">
-              <div className="pblock__row">
-                <Logo />
-                <span className="panel__spacer" />
-                <button type="button" className="icon-btn" onClick={onReset} title="Загрузить другой файл">
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                    <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                  </svg>
-                </button>
-                <button type="button" className="btn btn--primary" onClick={onExport}>
-                  Скачать JSON
-                </button>
-              </div>
-              <div className="pblock__row">
-                <span className="panel__file">
-                  {fileName} · {records.length} адр.
-                </span>
-                <ThemeToggle theme={theme} onToggle={onToggleTheme} />
-              </div>
-            </section>
+      {open && (
+        <RecordEditor key={open.id} record={open} origin={openOrigin} onBack={() => setOpenId(null)} onSave={handleSave} />
+      )}
 
-            {tipOpen && (
-              <section className="pblock pblock--tip">
-                <div className="pblock__row">
-                  <b className="pblock__title">Как проверить разбор</b>
-                  <button type="button" className="icon-btn icon-btn--sm" onClick={hideTip} aria-label="Скрыть подсказку">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                      <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                    </svg>
-                  </button>
-                </div>
-                <Steps items={TIP_STEPS} compact />
-              </section>
-            )}
+      <aside className="panel" inert={open ? true : undefined}>
+        <section className="pblock pblock--head">
+          <div className="pblock__row">
+            <Logo />
+            <span className="panel__spacer" />
+            <button type="button" className="icon-btn" onClick={onReset} title="Загрузить другой файл">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            </button>
+            <button type="button" className="btn btn--primary" onClick={onExport}>
+              Скачать JSON
+            </button>
+          </div>
+          <div className="pblock__row">
+            <span className="panel__file">
+              {fileName} · {records.length} адр.
+            </span>
+            <ThemeToggle theme={theme} onToggle={onToggleTheme} />
+          </div>
+        </section>
 
-            <section className="pblock pblock--list">
-              <div className="panel__controls">
-                <div className="tabs" role="tablist">
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={filter === 'all'}
-                    className={`tabs__item${filter === 'all' ? ' tabs__item--active' : ''}`}
-                    onClick={() => changeFilter('all')}
-                  >
-                    Все
-                  </button>
-                  <button
-                    type="button"
-                    role="tab"
-                    aria-selected={filter === 'low'}
-                    className={`tabs__item${filter === 'low' ? ' tabs__item--active' : ''}`}
-                    onClick={() => changeFilter('low')}
-                  >
-                    Неуверенные {lowCount > 0 && <span className="tabs__badge">{lowCount}</span>}
-                  </button>
-                </div>
-                <input
-                  className="panel__search"
-                  type="search"
-                  value={query}
-                  onChange={(e) => {
-                    setQuery(e.target.value);
-                    setLimit(PAGE);
-                  }}
-                  placeholder="Найти адрес"
-                />
-              </div>
-
-              <div className="panel__list">
-                {visible.length === 0 && (
-                  <div className="panel__empty">
-                    {filter === 'low' && !query ? 'Неуверенных адресов нет' : 'Ничего не найдено'}
-                  </div>
-                )}
-                {shown.map((r) => (
-                  <RecordItem key={r.id} record={r} onOpen={setOpenId} />
-                ))}
-                {shown.length < visible.length && <div ref={sentinelRef} className="panel__sentinel" />}
-              </div>
-            </section>
-          </>
+        {tipOpen && (
+          <section className="pblock pblock--tip">
+            <div className="pblock__row">
+              <b className="pblock__title">Как проверить разбор</b>
+              <button type="button" className="icon-btn icon-btn--sm" onClick={hideTip} aria-label="Скрыть подсказку">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                </svg>
+              </button>
+            </div>
+            <Steps items={TIP_STEPS} compact />
+          </section>
         )}
+
+        <section className="pblock pblock--list">
+          <div className="panel__controls">
+            <div className="tabs" role="tablist">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={filter === 'all'}
+                className={`tabs__item${filter === 'all' ? ' tabs__item--active' : ''}`}
+                onClick={() => changeFilter('all')}
+              >
+                Все
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={filter === 'low'}
+                className={`tabs__item${filter === 'low' ? ' tabs__item--active' : ''}`}
+                onClick={() => changeFilter('low')}
+              >
+                Неуверенные {lowCount > 0 && <span className="tabs__badge">{lowCount}</span>}
+              </button>
+            </div>
+            <input
+              className="panel__search"
+              type="search"
+              value={query}
+              onChange={(e) => {
+                setQuery(e.target.value);
+                setLimit(PAGE);
+              }}
+              placeholder="Найти адрес"
+            />
+          </div>
+
+          <div className="panel__list">
+            {visible.length === 0 && (
+              <div className="panel__empty">
+                {filter === 'low' && !query ? 'Неуверенных адресов нет' : 'Ничего не найдено'}
+              </div>
+            )}
+            {shown.map((r) => (
+              <RecordItem key={r.id} record={r} onOpen={openRecord} />
+            ))}
+            {shown.length < visible.length && <div ref={sentinelRef} className="panel__sentinel" />}
+          </div>
+        </section>
       </aside>
     </div>
   );
