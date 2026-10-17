@@ -28,7 +28,7 @@
 | Запас по скорости | **~240×** |
 | База адресов | 49 541 улица/жилой массив, 20 областей, 238 городов, 230 районов |
 | Режим БД | SQLite + FTS5, read-only (`mode=ro`), hot-reload по mtime |
-| Размер боевой БД | 246.6 MB (закоммичена в репозиторий) |
+| Размер боевой БД | 246.6 MB (не в Git — GitHub limit 100 MB; подкладывается локально) |
 | QA | `ruff check` — 0 ошибок; `pytest` — 84 passed |
 
 ---
@@ -141,9 +141,15 @@ raw_address
 
 ## Быстрый запуск
 
-Требуется Docker с Compose v2. Из корня репозитория:
+Требуется Docker с Compose v2 и файл базы `backend/data/address_base.db`
+(246.6 MB — GitHub не принимает файлы больше 100 MB, поэтому БД не хранится
+в репозитории). Положите её на место перед первым запуском.
 
 ```bash
+# файл БД должен лежать здесь:
+ls -lh backend/data/address_base.db
+
+# запуск из корня репозитория
 docker compose up -d --build
 ```
 
@@ -160,8 +166,10 @@ docker compose up -d --build
 
 `web` стартует только после того, как healthcheck `api` подтвердит
 `db_loaded: true`. База `backend/data/address_base.db` монтируется в API
-контейнер как `/data` **read-only**, поэтому запущенная система работает
-автономно и не зависит от интернета.
+контейнер как `/data` **read-only**, поэтому после подготовки файла запущенная
+система работает автономно и не зависит от интернета. Без файла БД API
+поднимется в fallback-режиме (`db_loaded: false`), но `web` не стартует из-за
+`depends_on: service_healthy`.
 
 Проверка:
 
@@ -414,7 +422,7 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 │   │   ├── core/tail_parser.py # дом/квартира/подъезд/этаж/ориентир
 │   │   └── repositories/repository.py  # SQLite FTS5, fallback, hot-reload
 │   ├── data/
-│   │   └── address_base.db     # боевая БД, 246.6 MB, монтируется в контейнер
+│   │   └── address_base.db     # локальная БД 246.6 MB (не в Git), монтируется в контейнер
 │   ├── db/schema.sql           # эталонная схема v2
 │   ├── scripts/
 │   │   ├── bench.py            # замер производительности
@@ -444,9 +452,9 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 
 ## Данные и Docker
 
-- `backend/data/address_base.db` (246.6 MB) **закоммичена в репозиторий** —
-  это осознанное требование автономности: `docker compose up` не должен
-  скачивать или собирать базу.
+- `backend/data/address_base.db` (246.6 MB) **не хранится в Git**: GitHub
+  отклоняет файлы больше 100 MB. Файл подкладывается локально перед запуском
+  (`docker compose` монтирует его в API-контейнер и не копирует в build context).
 - В `docker-compose.yml` каталог `backend/data` монтируется в API-контейнер
   как `/data:ro`; переменная `ADDRESS_DB_PATH=/data/address_base.db`.
 - Сервис `web` собирается из `jana-post-front`, слушает `8080` и проксирует
