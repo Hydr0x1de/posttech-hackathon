@@ -70,6 +70,11 @@ services:
 
 nginx резолвит адрес бэкенда при каждом запросе, поэтому фронт стартует, даже если `api` ещё поднимается.
 
+> Windows: если сборка падает с `set: line 2: illegal option -`, значит
+> `offline-map/fetch.sh` получил CRLF. В корневом `.gitattributes` зафиксирован
+> LF, а Dockerfile очищает `\r` перед запуском. После `git pull` пересоберите:
+> `docker compose build --no-cache web`.
+
 ## Контракт с бэкендом
 
 ### `POST /api/v1/parse/batch`

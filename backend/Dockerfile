@@ -31,7 +31,8 @@ COPY app ./app
 COPY db ./db
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 
-RUN chmod 0755 /usr/local/bin/entrypoint.sh \
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh \
+    && chmod 0755 /usr/local/bin/entrypoint.sh \
     && useradd --create-home --uid 10001 appuser \
     && mkdir -p /data \
     && chown -R appuser:appuser /app /data

@@ -1,0 +1,24 @@
+# Normalize line endings across platforms.
+# Windows checkouts must not convert shell scripts/Dockerfiles to CRLF.
+* text=auto
+
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.template text eol=lf
+*.py text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.json text eol=lf
+*.md text eol=lf
+*.sql text eol=lf
+
+# Binary assets
+*.db binary
+*.pmtiles binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.woff2 binary

@@ -234,6 +234,36 @@ npm ci
 npm run dev          # http://localhost:5173, /api проксируется на :8000
 ```
 
+### Windows / CRLF
+
+Если сборка падает с ошибкой вида:
+
+```text
+set: line 2: illegal option -
+```
+
+значит `.sh`-файлы попали в рабочую копию с CRLF-переводами строк (типично для
+Git for Windows). В репозитории есть `.gitattributes`, который фиксирует LF для
+`*.sh` и `Dockerfile`, а Dockerfile дополнительно очищает `\r` перед запуском
+скриптов. После обновления:
+
+```bash
+git pull
+docker compose build --no-cache api web
+docker compose up -d
+```
+
+Если старые файлы всё ещё с CRLF:
+
+```bash
+git config core.autocrlf false
+git rm --cached -r .
+git reset --hard
+```
+
+Путь `fetch.sh (http://fetch.sh/)` из вывода Docker Desktop — это его
+авто-ссылка в логе; на ошибку влияет именно CRLF, а не имя файла.
+
 ---
 
 ## REST API

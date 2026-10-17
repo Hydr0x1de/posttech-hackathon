@@ -10,7 +10,10 @@ RUN npm run build
 FROM alpine:3.20 AS maps
 RUN apk add --no-cache curl coreutils
 COPY offline-map /offline-map
-RUN sh /offline-map/fetch.sh /tiles
+# Windows checkouts may contain CRLF; strip it before running the shell script.
+# Keep the file in place: fetch.sh resolves cities.geojson relative to itself.
+RUN sed -i 's/\r$//' /offline-map/fetch.sh \
+    && sh /offline-map/fetch.sh /tiles
 
 FROM nginx:1.27-alpine
 COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
