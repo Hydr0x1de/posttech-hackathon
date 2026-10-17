@@ -22,9 +22,11 @@ dev
 *.md
 !README.md
 
-# The DB is provided by the docker-compose volume, not baked into the image
+# The production DB is baked into the image. It is not stored in Git,
+# so image builds (CI) download the release asset first.
 data/*
 !data/.gitkeep
+!data/address_base.db
 
 # Logs and temp files
 *.log

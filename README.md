@@ -28,7 +28,7 @@
 | Запас по скорости | **~240×** |
 | База адресов | 49 541 улица/жилой массив, 20 областей, 238 городов, 230 районов |
 | Режим БД | SQLite + FTS5, read-only (`mode=ro`), hot-reload по mtime |
-| Размер боевой БД | 246.6 MB (GitHub Release, скачивается при первом старте) |
+| Размер боевой БД | 246.6 MB (вшита в Docker-образ API) |
 | QA | `ruff check` — 0 ошибок; `pytest` — 84 passed |
 
 ---
@@ -132,7 +132,7 @@ raw_address
 - Пакет обрабатывается в `ThreadPoolExecutor` (4 потока по умолчанию);
   CPU-bound разбор уводится из event loop через `run_in_threadpool`.
 - SQLite-соединения thread-local, только чтение (`mode=ro`,
-  `PRAGMA query_only = 1`): даже в writable named volume API не изменяет БД.
+  `PRAGMA query_only = 1`): API не изменяет вшитую в образ БД.
 - Быстрый путь: точное совпадение названия не перебирает окна и не вызывает
   `difflib`.
 
@@ -140,51 +140,48 @@ raw_address
 
 ## Быстрый запуск
 
-Требуется Docker с Compose v2. Чистый клон запускается **одной командой**:
+Готовые образы лежат в GitHub Container Registry, и **вся база адресов уже
+внутри образа API** (а офлайн-карта — внутри образа web). Скачивания БД,
+volume и seed-файлов при запуске больше нет.
+
+Требуется Docker с Compose v2:
 
 ```bash
-docker compose up -d --build
+docker compose up -d
 ```
 
-База адресов (246.6 MB) не хранится в Git из-за лимита GitHub 100 MB.
-При первом старте API-контейнер сам:
+Compose скачает:
 
-1. проверяет `/data/address_base.db` в named volume;
-2. если файла нет — использует локальный seed `backend/data/address_base.db`, если он есть;
-3. иначе скачивает релизный артефакт
-   [`v1.0/address_base.db`](https://github.com/Hydr0x1de/posttech-hackathon/releases/download/v1.0/address_base.db)
-   через `curl -L` (с переходом по редиректам) и проверяет SQLite-заголовок;
-4. если GitHub недоступен — повторяет загрузку с резервного зеркала
-   [`posttech_db.hydr0x1de.xyz/address_base.db`](https://posttech_db.hydr0x1de.xyz/address_base.db).
-
-Дальше БД живёт в Docker volume `address_data` и переживает рестарты.
-Повторно скачать её можно командой `docker compose down -v && docker compose up -d --build`.
-
-Поднимаются два сервиса:
-
-| Сервис | Контейнер | Порт | Назначение |
+| Сервис | Образ | Порт | Что внутри |
 |---|---|---|---|
-| `api` | `jana-address-api` | `8000` | FastAPI + SQLite FTS5 |
-| `web` | `jana-address-web` | `8080` | React/Vite UI + nginx-прокси `/api/*` → `api:8000` |
+| `api` | `ghcr.io/hydr0x1de/posttech-hackathon-api:1.0.0` | `8000` | FastAPI + SQLite FTS5 + `address_base.db` |
+| `web` | `ghcr.io/hydr0x1de/posttech-hackathon-web:1.0.0` | `8080` | React/Vite UI + nginx + PMTiles |
 
 - **Интерфейс:** http://localhost:8080
 - **API:** http://localhost:8000
 - **Swagger:** http://localhost:8000/docs
 
-`web` стартует после того, как API станет healthy. На чистом клоне первый
-запуск требует интернет для скачивания БД; после этого база лежит в named
-volume, и система работает автономно.
+После первого `docker compose pull` образы лежат локально, и запуск работает
+без сети. `web` стартует после того, как healthcheck API подтвердит
+`db_loaded: true`.
 
-Если сети нет **и** локальной БД тоже нет:
+### Пересборка образов (для мейнтейнеров)
 
-- по умолчанию (`ADDRESS_DB_REQUIRED=false`) API всё равно стартует в
-  fallback-режиме: regex-разбор, `confidence = 0.5`, `db_loaded: false`;
-  контейнер healthy, `web` поднимается и интерфейс работает;
-- при `ADDRESS_DB_REQUIRED=true` entrypoint завершится с ошибкой, API не
-  запустится, `web` будет ждать healthy API.
+Для локальной сборки нужен файл `backend/data/address_base.db` (246.6 MB,
+в Git не хранится):
 
-Проверить фактическое состояние БД можно не только по `docker compose ps`,
-но и по `/api/v1/health` (`db_loaded`).
+```bash
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+Публикация в GHCR выполняется GitHub Actions
+(`.github/workflows/images.yml`) при push в `master` или по тегу `v*`.
+Workflow скачивает БД из GitHub Release (с fallback-зеркалом), вшивает её в
+API-образ и пушит `api` + `web` с тегами `1.0.0`, `latest`, `sha-<commit>`.
+
+Если БД отсутствует в образе (например, сломанная локальная сборка),
+healthcheck API не станет healthy, и `web` не запустится. Runtime-скачивания
+БД нет — это осознанно: справочники должны поставляться внутри образа.
 
 Проверка:
 
@@ -196,10 +193,6 @@ curl -s http://localhost:8000/api/v1/health | python3 -m json.tool
 
 nginx проксирует `/api/*` на бэкенд, поэтому фронтенд и API находятся на одном
 origin — CORS для браузера не требуется.
-
-> Первая сборка `web` требует интернет для `npm ci` и загрузки офлайн-тайлов
-> карты в Docker-стадию `maps`. После сборки образ и запущенная система
-> работают без сети.
 
 Остановка:
 
@@ -249,7 +242,7 @@ Git for Windows). В репозитории есть `.gitattributes`, кото�
 
 ```bash
 git pull
-docker compose build --no-cache api web
+docker compose -f docker-compose.yml -f docker-compose.build.yml build --no-cache api web
 docker compose up -d
 ```
 
@@ -441,7 +434,10 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 
 ```
 .
-├── docker-compose.yml          # api + web, одна команда запуска из корня
+├── docker-compose.yml          # готовые образы api + web из GHCR
+├── docker-compose.build.yml    # опциональная локальная сборка образов
+├── .github/workflows/
+│   └── images.yml              # сборка и публикация образов в GHCR
 ├── README.md
 ├── .gitignore                  # кэши, .venv, node_modules, логи; боевая БД не игнорируется
 ├── jana-post-front/            # React 19 + Vite UI
@@ -467,9 +463,8 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 │   │   ├── core/tail_parser.py # дом/квартира/подъезд/этаж/ориентир
 │   │   └── repositories/repository.py  # SQLite FTS5, fallback, hot-reload
 │   ├── data/
-│   │   ├── address_base.db     # опциональный локальный seed (не в Git)
+│   │   ├── address_base.db     # вход для сборки образа (не в Git)
 │   │   └── README.md           # как устроена доставка БД
-│   ├── entrypoint.sh           # seed / GitHub / зеркало → /data, fallback-режим
 │   ├── db/schema.sql           # эталонная схема v2
 │   ├── scripts/
 │   │   ├── bench.py            # замер производительности
@@ -487,11 +482,7 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
-| `ADDRESS_DB_PATH` | `data/address_base.db` (в Docker — `/data/address_base.db`) | путь к базе адресов |
-| `ADDRESS_DB_URL` | GitHub Release `v1.0/address_base.db` | основной источник БД |
-| `ADDRESS_DB_FALLBACK_URL` | `https://posttech_db.hydr0x1de.xyz/address_base.db` | резервное зеркало, если GitHub недоступен |
-| `ADDRESS_DB_SEED` | `/seed/address_base.db` | локальный seed, если он есть |
-| `ADDRESS_DB_REQUIRED` | `false` | `true` — не запускать API без БД; `false` — разрешить regex-fallback |
+| `ADDRESS_DB_PATH` | `data/address_base.db` (в Docker — `/data/address_base.db`) | путь к вшитой в образ БД |
 | `MAX_BATCH_SIZE` | `5000` | максимум записей в одном запросе |
 | `PARSER_WORKERS` | `4` | потоки обработки пакета |
 | `PARSER_CACHE_SIZE` | `200000` | размер LRU-кэша разобранных адресов |
@@ -504,23 +495,18 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 ## Данные и Docker
 
 - `backend/data/address_base.db` (246.6 MB) **не хранится в Git**: GitHub
-  отклоняет файлы больше 100 MB. Артефакт опубликован в
-  [GitHub Release v1.0](https://github.com/Hydr0x1de/posttech-hackathon/releases/tag/v1.0).
-- `backend/entrypoint.sh` перед запуском FastAPI проверяет `/data/address_base.db`,
-  копирует локальный seed из `/seed` или скачивает релиз через `curl -L`
-  (редиректы HTTP→HTTPS поддерживаются), при недоступности GitHub переключается
-  на зеркало `posttech_db.hydr0x1de.xyz`, проверяет заголовок `SQLite format 3`
-  и только затем запускает `uvicorn`.
-- В `docker-compose.yml` каталог `backend/data` монтируется в API-контейнер
-  как `/seed:ro`, а БД хранится в named volume `address_data:/data`.
-- Сервис `web` собирается из `jana-post-front`, слушает `8080` и проксирует
+  отклоняет файлы больше 100 MB. Она вшивается в API-образ на этапе сборки:
+  локально — из `backend/data/address_base.db`, в CI — из
+  [GitHub Release v1.0](https://github.com/Hydr0x1de/posttech-hackathon/releases/tag/v1.0)
+  (fallback-зеркало `posttech_db.hydr0x1de.xyz` используется только сборкой).
+- `backend/Dockerfile` копирует `data/address_base.db` в `/data/address_base.db`
+  внутри образа. В `docker-compose.yml` нет volume для БД и нет runtime-скачивания.
+- `.dockerignore` **не исключает** `data/address_base.db` из build context:
+  файл нужен для сборки образа. Остальные данные и тесты исключены.
+- `web` собирается из `jana-post-front`, слушает `8080` и проксирует
   `/api/*` на `http://api:8000`. `depends_on` ждёт `service_healthy`.
-- `.dockerignore` исключает `data/*` из build context, чтобы 247 MB не
-  отправлялись в Docker daemon при каждой сборке.
-- Healthcheck контейнера проверяет HTTP 200 и печатает `db_loaded` в свой
-  output. По умолчанию он здоров и в fallback-режиме; для строгой проверки
-  задайте `ADDRESS_DB_REQUIRED=true`. `start_period` увеличен до 180 с под
-  скачивание БД.
+- Healthcheck API строгий: HTTP 200 + `db_loaded: true`. Если БД не попала в
+  образ, контейнер будет unhealthy, и `web` не запустится.
 - SQLite открывается в режиме `mode=ro` с `PRAGMA query_only = 1`;
   WAL/SHM sidecar-файлы не создаются.
 
