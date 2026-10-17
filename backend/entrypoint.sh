@@ -56,21 +56,26 @@ if [ ! -s "$DB_PATH" ]; then
         if ! fetch_db "$DB_URL" "GitHub Release"; then
             echo "GitHub недоступен, пробуем резервный источник..." >&2
             if ! fetch_db "$DB_FALLBACK_URL" "fallback CDN"; then
-                echo "Не удалось скачать БД ни с GitHub, ни с резервного источника." >&2
-                echo "Проверьте ADDRESS_DB_URL / ADDRESS_DB_FALLBACK_URL и сеть." >&2
-                exit 1
+                if [ "${ADDRESS_DB_REQUIRED:-false}" = "true" ]; then
+                    echo "Не удалось скачать БД ни с GitHub, ни с резервного источника." >&2
+                    echo "ADDRESS_DB_REQUIRED=true — завершаю запуск." >&2
+                    exit 1
+                fi
+                echo "ВНИМАНИЕ: БД не загружена. API запустится в fallback-режиме" >&2
+                echo "(db_loaded=false, regex-разбор с confidence=0.5)." >&2
             fi
         fi
     fi
 
-    if ! is_sqlite "$PART_PATH"; then
-        echo "Файл не является SQLite-базой. Удаляю $PART_PATH." >&2
-        rm -f "$PART_PATH"
-        exit 1
+    if [ -s "$PART_PATH" ]; then
+        if ! is_sqlite "$PART_PATH"; then
+            echo "Файл не является SQLite-базой. Удаляю $PART_PATH." >&2
+            rm -f "$PART_PATH"
+            exit 1
+        fi
+        mv "$PART_PATH" "$DB_PATH"
+        echo "База данных готова: $DB_PATH ($(du -h "$DB_PATH" | cut -f1))"
     fi
-
-    mv "$PART_PATH" "$DB_PATH"
-    echo "База данных готова: $DB_PATH ($(du -h "$DB_PATH" | cut -f1))"
 fi
 
 exec "$@"

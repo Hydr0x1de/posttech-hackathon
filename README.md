@@ -171,11 +171,20 @@ docker compose up -d --build
 - **API:** http://localhost:8000
 - **Swagger:** http://localhost:8000/docs
 
-`web` стартует только после того, как healthcheck `api` подтвердит
-`db_loaded: true`. На чистом клоне первый запуск требует интернет для скачивания
-БД; после этого база лежит в named volume, и система работает автономно.
-Если скачивание не удалось, API завершится с ошибкой — проверьте `ADDRESS_DB_URL`
-и сеть.
+`web` стартует после того, как API станет healthy. На чистом клоне первый
+запуск требует интернет для скачивания БД; после этого база лежит в named
+volume, и система работает автономно.
+
+Если сети нет **и** локальной БД тоже нет:
+
+- по умолчанию (`ADDRESS_DB_REQUIRED=false`) API всё равно стартует в
+  fallback-режиме: regex-разбор, `confidence = 0.5`, `db_loaded: false`;
+  контейнер healthy, `web` поднимается и интерфейс работает;
+- при `ADDRESS_DB_REQUIRED=true` entrypoint завершится с ошибкой, API не
+  запустится, `web` будет ждать healthy API.
+
+Проверить фактическое состояние БД можно не только по `docker compose ps`,
+но и по `/api/v1/health` (`db_loaded`).
 
 Проверка:
 
@@ -430,7 +439,7 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 │   ├── data/
 │   │   ├── address_base.db     # опциональный локальный seed (не в Git)
 │   │   └── README.md           # как устроена доставка БД
-│   ├── entrypoint.sh           # seed из /seed или скачивание БД в /data
+│   ├── entrypoint.sh           # seed / GitHub / зеркало → /data, fallback-режим
 │   ├── db/schema.sql           # эталонная схема v2
 │   ├── scripts/
 │   │   ├── bench.py            # замер производительности
@@ -452,6 +461,7 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 | `ADDRESS_DB_URL` | GitHub Release `v1.0/address_base.db` | основной источник БД |
 | `ADDRESS_DB_FALLBACK_URL` | `https://posttech_db.hydr0x1de.xyz/address_base.db` | резервное зеркало, если GitHub недоступен |
 | `ADDRESS_DB_SEED` | `/seed/address_base.db` | локальный seed, если он есть |
+| `ADDRESS_DB_REQUIRED` | `false` | `true` — не запускать API без БД; `false` — разрешить regex-fallback |
 | `MAX_BATCH_SIZE` | `5000` | максимум записей в одном запросе |
 | `PARSER_WORKERS` | `4` | потоки обработки пакета |
 | `PARSER_CACHE_SIZE` | `200000` | размер LRU-кэша разобранных адресов |
@@ -477,8 +487,10 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
   `/api/*` на `http://api:8000`. `depends_on` ждёт `service_healthy`.
 - `.dockerignore` исключает `data/*` из build context, чтобы 247 MB не
   отправлялись в Docker daemon при каждой сборке.
-- Healthcheck контейнера проверяет не только HTTP 200, но и
-  `db_loaded: true`; `start_period` увеличен до 180 с под скачивание БД.
+- Healthcheck контейнера проверяет HTTP 200 и печатает `db_loaded` в свой
+  output. По умолчанию он здоров и в fallback-режиме; для строгой проверки
+  задайте `ADDRESS_DB_REQUIRED=true`. `start_period` увеличен до 180 с под
+  скачивание БД.
 - SQLite открывается в режиме `mode=ro` с `PRAGMA query_only = 1`;
   WAL/SHM sidecar-файлы не создаются.
 

@@ -27,5 +27,10 @@ docker compose down -v
 docker compose up -d --build
 ```
 
+If both GitHub and the mirror are unreachable and no local seed exists, the
+default `ADDRESS_DB_REQUIRED=false` lets the API start in regex fallback mode
+(`db_loaded: false`, `confidence = 0.5`). Set `ADDRESS_DB_REQUIRED=true` to
+fail fast instead.
+
 The database is built by `base-builder/build_osm_db.py` from OSM PBF + KATO,
 or copied from the team's prepared artifact.

@@ -41,12 +41,15 @@ USER appuser
 EXPOSE 8000
 
 # Проверка живости без внешних утилит (образ работает автономно).
-# Контейнер здоров только если API отвечает и база адресов загружена.
+# По умолчанию контейнер здоров и в fallback-режиме; /health показывает
+# db_loaded. Для строгого режима задайте ADDRESS_DB_REQUIRED=true.
 # start-period увеличен: на чистом клоне БД может скачиваться с GitHub.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=180s --retries=5 \
-    CMD python -c "import json,sys,urllib.request; \
+    CMD python -c "import json,os,sys,urllib.request; \
 p=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/v1/health', timeout=3)); \
-sys.exit(0 if p.get('status')=='ok' and p.get('db_loaded') is True else 1)"
+required=os.getenv('ADDRESS_DB_REQUIRED','false').lower()=='true'; \
+print('db_loaded=%s required=%s' % (p.get('db_loaded'), required)); \
+sys.exit(0 if p.get('status')=='ok' and (p.get('db_loaded') is True or not required) else 1)"
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
