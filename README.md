@@ -28,7 +28,7 @@
 | Запас по скорости | **~240×** |
 | База адресов | 49 541 улица/жилой массив, 20 областей, 238 городов, 230 районов |
 | Режим БД | SQLite + FTS5, read-only (`mode=ro`), hot-reload по mtime |
-| Размер боевой БД | 246.6 MB (не в Git — GitHub limit 100 MB; подкладывается локально) |
+| Размер боевой БД | 246.6 MB (GitHub Release, скачивается при первом старте) |
 | QA | `ruff check` — 0 ошибок; `pytest` — 84 passed |
 
 ---
@@ -132,8 +132,7 @@ raw_address
 - Пакет обрабатывается в `ThreadPoolExecutor` (4 потока по умолчанию);
   CPU-bound разбор уводится из event loop через `run_in_threadpool`.
 - SQLite-соединения thread-local, только чтение (`mode=ro`,
-  `PRAGMA query_only = 1`), поэтому базу можно безопасно монтировать в
-  контейнер read-only.
+  `PRAGMA query_only = 1`): даже в writable named volume API не изменяет БД.
 - Быстрый путь: точное совпадение названия не перебирает окна и не вызывает
   `difflib`.
 
@@ -141,17 +140,23 @@ raw_address
 
 ## Быстрый запуск
 
-Требуется Docker с Compose v2 и файл базы `backend/data/address_base.db`
-(246.6 MB — GitHub не принимает файлы больше 100 MB, поэтому БД не хранится
-в репозитории). Положите её на место перед первым запуском.
+Требуется Docker с Compose v2. Чистый клон запускается **одной командой**:
 
 ```bash
-# файл БД должен лежать здесь:
-ls -lh backend/data/address_base.db
-
-# запуск из корня репозитория
 docker compose up -d --build
 ```
+
+База адресов (246.6 MB) не хранится в Git из-за лимита GitHub 100 MB.
+При первом старте API-контейнер сам:
+
+1. проверяет `/data/address_base.db` в named volume;
+2. если файла нет — использует локальный seed `backend/data/address_base.db`, если он есть;
+3. иначе скачивает релизный артефакт
+   [`v1.0/address_base.db`](https://github.com/Hydr0x1de/posttech-hackathon/releases/download/v1.0/address_base.db)
+   через `curl` и проверяет SQLite-заголовок.
+
+Дальше БД живёт в Docker volume `address_data` и переживает рестарты.
+Повторно скачать её можно командой `docker compose down -v && docker compose up -d --build`.
 
 Поднимаются два сервиса:
 
@@ -165,11 +170,10 @@ docker compose up -d --build
 - **Swagger:** http://localhost:8000/docs
 
 `web` стартует только после того, как healthcheck `api` подтвердит
-`db_loaded: true`. База `backend/data/address_base.db` монтируется в API
-контейнер как `/data` **read-only**, поэтому после подготовки файла запущенная
-система работает автономно и не зависит от интернета. Без файла БД API
-поднимется в fallback-режиме (`db_loaded: false`), но `web` не стартует из-за
-`depends_on: service_healthy`.
+`db_loaded: true`. На чистом клоне первый запуск требует интернет для скачивания
+БД; после этого база лежит в named volume, и система работает автономно.
+Если скачивание не удалось, API завершится с ошибкой — проверьте `ADDRESS_DB_URL`
+и сеть.
 
 Проверка:
 
@@ -422,7 +426,9 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 │   │   ├── core/tail_parser.py # дом/квартира/подъезд/этаж/ориентир
 │   │   └── repositories/repository.py  # SQLite FTS5, fallback, hot-reload
 │   ├── data/
-│   │   └── address_base.db     # локальная БД 246.6 MB (не в Git), монтируется в контейнер
+│   │   ├── address_base.db     # опциональный локальный seed (не в Git)
+│   │   └── README.md           # как устроена доставка БД
+│   ├── entrypoint.sh           # seed из /seed или скачивание БД в /data
 │   ├── db/schema.sql           # эталонная схема v2
 │   ├── scripts/
 │   │   ├── bench.py            # замер производительности
@@ -441,6 +447,8 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 | Переменная | По умолчанию | Назначение |
 |---|---|---|
 | `ADDRESS_DB_PATH` | `data/address_base.db` (в Docker — `/data/address_base.db`) | путь к базе адресов |
+| `ADDRESS_DB_URL` | GitHub Release `v1.0/address_base.db` | откуда скачать БД при первом старте |
+| `ADDRESS_DB_SEED` | `/seed/address_base.db` | локальный seed, если он есть |
 | `MAX_BATCH_SIZE` | `5000` | максимум записей в одном запросе |
 | `PARSER_WORKERS` | `4` | потоки обработки пакета |
 | `PARSER_CACHE_SIZE` | `200000` | размер LRU-кэша разобранных адресов |
@@ -453,17 +461,19 @@ python3 scripts/bench.py --count 1000 --db data/address_base.db --repeat 3
 ## Данные и Docker
 
 - `backend/data/address_base.db` (246.6 MB) **не хранится в Git**: GitHub
-  отклоняет файлы больше 100 MB. Файл подкладывается локально перед запуском
-  (`docker compose` монтирует его в API-контейнер и не копирует в build context).
+  отклоняет файлы больше 100 MB. Артефакт опубликован в
+  [GitHub Release v1.0](https://github.com/Hydr0x1de/posttech-hackathon/releases/tag/v1.0).
+- `backend/entrypoint.sh` перед запуском FastAPI проверяет `/data/address_base.db`,
+  копирует локальный seed из `/seed` или скачивает релиз через `curl`,
+  проверяет заголовок `SQLite format 3` и только затем запускает `uvicorn`.
 - В `docker-compose.yml` каталог `backend/data` монтируется в API-контейнер
-  как `/data:ro`; переменная `ADDRESS_DB_PATH=/data/address_base.db`.
+  как `/seed:ro`, а БД хранится в named volume `address_data:/data`.
 - Сервис `web` собирается из `jana-post-front`, слушает `8080` и проксирует
   `/api/*` на `http://api:8000`. `depends_on` ждёт `service_healthy`.
 - `.dockerignore` исключает `data/*` из build context, чтобы 247 MB не
-  отправлялись в Docker daemon при каждой сборке. В контейнер база попадает
-  только через volume.
+  отправлялись в Docker daemon при каждой сборке.
 - Healthcheck контейнера проверяет не только HTTP 200, но и
-  `db_loaded: true`.
+  `db_loaded: true`; `start_period` увеличен до 180 с под скачивание БД.
 - SQLite открывается в режиме `mode=ro` с `PRAGMA query_only = 1`;
   WAL/SHM sidecar-файлы не создаются.
 

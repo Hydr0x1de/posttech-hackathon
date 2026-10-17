@@ -1,17 +1,25 @@
 # Address base
 
 `address_base.db` (246.6 MB) is **not stored in Git**: GitHub rejects files
-larger than 100 MB. Place the production database here before running
-`docker compose up -d --build`:
+larger than 100 MB. The production copy is published as a GitHub Release asset:
 
-```text
-backend/data/address_base.db
+https://github.com/Hydr0x1de/posttech-hackathon/releases/download/v1.0/address_base.db
+
+On a clean clone `backend/entrypoint.sh` downloads it automatically into the
+`address_data` Docker volume at `/data/address_base.db` before FastAPI starts.
+No manual step is required.
+
+If a local file exists at `backend/data/address_base.db`, it is mounted
+read-only at `/seed/address_base.db` and used as a seed instead of downloading.
+The API itself always reads the writable volume path (`/data/address_base.db`)
+in read-only SQLite mode.
+
+To force a fresh download:
+
+```bash
+docker compose down -v
+docker compose up -d --build
 ```
-
-The file is mounted read-only into the API container as
-`/data/address_base.db`. If it is absent, the API starts in fallback mode
-(`db_loaded: false`, regex parsing with `confidence = 0.5`), but the `web`
-container will wait for the API healthcheck and will not start.
 
 The database is built by `base-builder/build_osm_db.py` from OSM PBF + KATO,
 or copied from the team's prepared artifact.
