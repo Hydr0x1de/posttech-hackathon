@@ -30,6 +30,34 @@ async function postBatch(records, signal) {
   return list;
 }
 
+export async function geocodeRecord(record, { signal } = {}) {
+  const structured = record.city || record.street_name;
+  const body = structured
+    ? {
+        id: record.id,
+        city: record.city,
+        street_name: record.street_name,
+        house: record.house,
+      }
+    : { id: record.id, raw_address: record.raw_address };
+
+  try {
+    const res = await fetch(`${API_BASE}/geocode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal,
+    });
+
+    if (!res.ok) return null;
+    const data = await res.json();
+    return Number.isFinite(data.lat) && Number.isFinite(data.lon) ? data : null;
+  } catch (error) {
+    if (error.name === 'AbortError') throw error;
+    return null;
+  }
+}
+
 export async function parseBatch(records, { onProgress, signal } = {}) {
   const byId = new Map();
   for (let i = 0; i < records.length; i += CHUNK_SIZE) {

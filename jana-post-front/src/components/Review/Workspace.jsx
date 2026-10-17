@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_THRESHOLD, FIELDS } from '../../address/fields';
 import { mapQueries } from '../../address/records';
+import { geocodeRecord } from '../../api/client';
 import CustomMap from '../CustomMap/CustomMap';
 import { createNominatimProvider } from '../CustomMap/geocodeProviders';
 import Logo from '../Logo';
@@ -12,6 +13,7 @@ import './Workspace.css';
 
 const PAGE = 100;
 const KAZAKHSTAN = [67, 48];
+const ALLOW_ONLINE_GEOCODER = import.meta.env.VITE_ALLOW_ONLINE_GEOCODER === 'true';
 
 const isLow = (r) => r.confidence < DEFAULT_THRESHOLD;
 
@@ -43,6 +45,7 @@ export default function Workspace({ records, fileName, theme, onToggleTheme, onS
   const [openOrigin, setOpenOrigin] = useState(null);
   const [limit, setLimit] = useState(PAGE);
   const [tipOpen, setTipOpen] = useState(readTipOpen);
+  const [geo, setGeo] = useState({ id: null, file: null, point: null, status: 'idle' });
 
   const hideTip = () => {
     setTipOpen(false);
@@ -56,7 +59,13 @@ export default function Workspace({ records, fileName, theme, onToggleTheme, onS
     setLimit(PAGE);
   };
   const sentinelRef = useRef(null);
-  const geocoder = useMemo(() => createNominatimProvider({ language: 'ru', countryCodes: 'kz' }), []);
+  const recordsRef = useRef(records);
+  const geoCache = useRef(new Map());
+  const geoAbort = useRef(null);
+  const geocoder = useMemo(
+    () => (ALLOW_ONLINE_GEOCODER ? createNominatimProvider({ language: 'ru', countryCodes: 'kz' }) : null),
+    []
+  );
 
   const lowCount = useMemo(() => records.filter(isLow).length, [records]);
 
@@ -67,6 +76,56 @@ export default function Workspace({ records, fileName, theme, onToggleTheme, onS
 
   const open = openId ? records.find((r) => r.id === openId) : null;
   const shown = visible.slice(0, limit);
+  const geoIsCurrent = geo.id === openId && geo.file === fileName;
+  const geoPoint = geoIsCurrent ? geo.point : null;
+  const geoStatus = geoIsCurrent ? geo.status : openId ? 'loading' : 'idle';
+
+  useEffect(() => {
+    recordsRef.current = records;
+  }, [records]);
+
+  // Новый файл или reset — гео-кэш больше не актуален.
+  useEffect(() => {
+    geoCache.current.clear();
+    geoAbort.current?.abort();
+    geoAbort.current = null;
+  }, [fileName]);
+
+  useEffect(() => {
+    geoAbort.current?.abort();
+    geoAbort.current = null;
+
+    if (!openId) return undefined;
+
+    if (geoCache.current.has(openId)) return undefined;
+
+    const record = recordsRef.current.find((r) => r.id === openId);
+    if (!record) {
+      geoCache.current.set(openId, null);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    geoAbort.current = controller;
+
+    geocodeRecord(record, { signal: controller.signal })
+      .then((point) => {
+        if (controller.signal.aborted) return;
+        // null тоже кэшируем: повторно дёргать API для этой записи не нужно.
+        geoCache.current.set(openId, point);
+        setGeo({ id: openId, file: fileName, point, status: point ? 'found' : 'missing' });
+      })
+      .catch((error) => {
+        if (error.name === 'AbortError' || controller.signal.aborted) return;
+        geoCache.current.set(openId, null);
+        setGeo({ id: openId, file: fileName, point: null, status: 'missing' });
+      })
+      .finally(() => {
+        if (geoAbort.current === controller) geoAbort.current = null;
+      });
+
+    return () => controller.abort();
+  }, [openId, fileName]);
 
   useEffect(() => {
     const node = sentinelRef.current;
@@ -78,19 +137,47 @@ export default function Workspace({ records, fileName, theme, onToggleTheme, onS
     return () => observer.disconnect();
   }, [shown.length, visible.length, open]);
 
-  const openRecord = useCallback((id, origin = null) => {
-    setOpenOrigin(origin);
-    setOpenId(id);
-  }, []);
+  const openRecord = useCallback(
+    (id, origin = null) => {
+      setOpenOrigin(origin);
+      if (id) {
+        if (geoCache.current.has(id)) {
+          const point = geoCache.current.get(id);
+          setGeo({ id, file: fileName, point, status: point ? 'found' : 'missing' });
+        } else {
+          setGeo({ id, file: fileName, point: null, status: 'loading' });
+        }
+      }
+      setOpenId(id);
+    },
+    [fileName]
+  );
 
   const handleSave = (values) => {
     const index = visible.findIndex((r) => r.id === open.id);
     const next = visible[index + 1] ?? null;
+    // Поля адреса могли измениться — старую точку для этой записи не переиспользуем.
+    geoCache.current.delete(open.id);
+    geoAbort.current?.abort();
+    geoAbort.current = null;
     onSave(open.id, values);
     openRecord(next?.id ?? null);
   };
 
-  const hasCoords = open && Number.isFinite(open.lat) && Number.isFinite(open.lng);
+  let focusPoint;
+  if (open && geoPoint) {
+    focusPoint = {
+      lat: geoPoint.lat,
+      lng: geoPoint.lon,
+      label: open.raw_address,
+      precision: geoPoint.precision,
+    };
+  } else if (open && !ALLOW_ONLINE_GEOCODER && geoStatus === 'missing') {
+    focusPoint = { label: open.raw_address, notFound: true };
+  }
+
+  const focusQueries =
+    ALLOW_ONLINE_GEOCODER && open && geoStatus !== 'loading' && !geoPoint ? mapQueries(open) : undefined;
 
   return (
     <div className={`workspace${open ? ' workspace--editing' : ''}`}>
@@ -103,8 +190,8 @@ export default function Workspace({ records, fileName, theme, onToggleTheme, onS
           initialZoom={5}
           defaultStyleId={theme === 'dark' ? 'carto-dark' : 'carto-voyager'}
           offlineStyleId={theme === 'dark' ? 'offline-dark' : 'offline-light'}
-          focusQueries={open && !hasCoords ? mapQueries(open) : undefined}
-          focusPoint={hasCoords ? { lat: open.lat, lng: open.lng, label: open.raw_address } : undefined}
+          focusQueries={focusQueries}
+          focusPoint={focusPoint}
         />
       </div>
 
