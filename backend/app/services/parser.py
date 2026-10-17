@@ -544,18 +544,22 @@ def _is_ambiguous_match(
 
 
 class AddressParserService:
-    """Разбор адресов с кэшем и параллельной обработкой пакета."""
+    """Разбор адресов с параллельной обработкой пакета.
+
+    Полные строки адресов намеренно НЕ кэшируются как готовые ответы:
+    ТЗ запрещает возврат ответа по точному совпадению всей входной строки.
+    LRU используется только для промежуточных вычислений (похожесть,
+    варианты названий, ключи классификаторов).
+    """
 
     def __init__(
         self,
         repository_provider: Callable[[], AddressRepository | NullAddressRepository],
         *,
         workers: int = 4,
-        cache_size: int = 200_000,
     ) -> None:
         self._repository_provider = repository_provider
         self._workers = max(1, workers)
-        self._parse_fields = lru_cache(maxsize=cache_size)(self._parse_fields_uncached)
 
     # -- публичный API ----------------------------------------------------- #
 
@@ -583,7 +587,7 @@ class AddressParserService:
 
     # -- основной конвейер ------------------------------------------------- #
 
-    def _parse_fields_uncached(self, raw_address: str) -> tuple[object, ...]:
+    def _parse_fields(self, raw_address: str) -> tuple[object, ...]:
         if not raw_address or not raw_address.strip():
             return _EMPTY_FIELDS
 

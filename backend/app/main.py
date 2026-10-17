@@ -40,7 +40,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.parser = AddressParserService(
             manager.get,
             workers=settings.workers,
-            cache_size=settings.cache_size,
         )
         health = manager.health()
         if health.get("db_loaded"):

@@ -166,7 +166,7 @@ def test_classifier_index_helper():
     assert index.district_keys["ауэзовск"][0].name == "Ауэзовский"
 
 
-def test_cache_returns_same_result(db_parser):
+def test_same_address_with_different_ids(db_parser):
     first = db_parser.parse("a", "Алматы, Абая 55")
     second = db_parser.parse("b", "Алматы, Абая 55")
     assert first.to_dict() | {"id": "b"} == second.to_dict()
@@ -412,3 +412,19 @@ def test_untrusted_match_does_not_guess_street_type():
     )
     assert result.street_type is None
     assert result.city is None
+
+
+def test_full_address_result_is_not_cached(db_parser):
+    """ТЗ запрещает готовый ответ по точному совпадению всей строки."""
+    calls = 0
+    original = db_parser._parse_fields
+
+    def counting(raw_address: str):
+        nonlocal calls
+        calls += 1
+        return original(raw_address)
+
+    db_parser._parse_fields = counting  # type: ignore[method-assign]
+    db_parser.parse("a", "Алматы, Абая 55")
+    db_parser.parse("b", "Алматы, Абая 55")
+    assert calls == 2

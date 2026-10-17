@@ -13,7 +13,6 @@ services:
       ADDRESS_DB_PATH: /data/address_base.db
       MAX_BATCH_SIZE: "5000"
       PARSER_WORKERS: "4"
-      PARSER_CACHE_SIZE: "200000"
       DB_RELOAD_INTERVAL: "5"
       LOG_LEVEL: INFO
     healthcheck:
