@@ -217,6 +217,22 @@ def truncated_parser(truncated_db) -> AddressParserService:
     return AddressParserService(RepositoryManager(str(truncated_db), reload_interval=0).get)
 
 
+@pytest.fixture()
+def generic_type_parser(generic_type_db) -> AddressParserService:
+    return AddressParserService(
+        RepositoryManager(str(generic_type_db), reload_interval=0).get
+    )
+
+
+def test_generic_type_entity_is_not_used_as_microdistrict(generic_type_parser):
+    """«Мкр» — это тип, а не название. Настоящий микрорайон — «Орбита-1»."""
+    result = generic_type_parser.parse("rec_1", "Мкр Орбита-1, улица Абая 12")
+    assert result.living_area == "Орбита-1"
+    assert result.street_name == "Абая"
+    assert result.street_type in {"улица", "проспект"}
+    assert result.house == "12"
+
+
 def test_kazakh_name_is_not_trimmed(db_parser):
     """Казахское написание названия не должно резаться до последнего слова."""
     result = db_parser.parse("rec_1", "Алматы, Қабанбай батыр 12а")

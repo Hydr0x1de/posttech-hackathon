@@ -111,6 +111,33 @@ def turan_db(demo_db: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 @pytest.fixture(scope="session")
+def generic_type_db(demo_db: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Демо-база + мусорная сущность «МКР», которая не должна быть топонимом."""
+    path = tmp_path_factory.mktemp("db_generic_type") / "address_base.db"
+    shutil.copy2(demo_db, path)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            """INSERT INTO streets_and_areas
+               (id, city_id, district_id, province_id, entity_type, street_type,
+                name_official, name_norm, name_core_norm, aliases)
+               VALUES (48214, 1, 1, 1, 'living_area', 'микрорайон',
+                       'МКР', 'мкр', 'мкр', NULL)""",
+        )
+        conn.execute(
+            """INSERT INTO fts_address
+               (entity_id, entity_type, city_id, district_id, province_id,
+                street_type, name_official, search_text)
+               VALUES ('48214', 'living_area', 1, 1, 1, 'микрорайон',
+                       'МКР', 'мкр')""",
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return path
+
+
+@pytest.fixture(scope="session")
 def truncated_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """База с «куцым» name_norm и сущностью, непохожей на запрос.
 

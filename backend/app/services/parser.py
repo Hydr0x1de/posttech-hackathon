@@ -342,8 +342,10 @@ def _similarity(query: str, name: str) -> float:
     """
     if not query or not name:
         return 0.0
-    query = fold_kazakh(query)
-    name = fold_kazakh(name)
+    # Пунктуация нормализуется так же, как в названиях из БД:
+    # «Орбита-1» и «орбита 1» — одно и то же название.
+    query = fold_kazakh(normalize(query))
+    name = fold_kazakh(normalize(name))
     if query == name:
         return 1.0
     char_ratio = difflib.SequenceMatcher(None, query, name, autojunk=False).ratio()
@@ -477,6 +479,22 @@ def _target_names(candidate: StreetEntity) -> tuple[str, ...]:
     return tuple(dict.fromkeys(targets))
 
 
+def _is_generic_type_name(candidate: StreetEntity) -> bool:
+    """Сущность называется только типом («МКР», «улица») — это не топоним.
+
+    В БД встречаются мусорные записи с name_official = "МКР". Без этого
+    фильтра запрос «Мкр Орбита-1, улица Абая 12» exact-матчил токен «мкр»
+    на такую запись и терял настоящий микрорайон «Орбита-1».
+    """
+    targets = _target_names(candidate)
+    if not targets:
+        return True
+    for target in targets:
+        if any(vocab.canonical_street_type(token) is None for token in target.split()):
+            return False
+    return True
+
+
 def _best_match_for_entity(
     name_tokens: Sequence[Token], candidate: StreetEntity
 ) -> _EntityMatch | None:
@@ -516,7 +534,7 @@ def _exact_match(
     Точное совпадение (score=1.0) не требует перебора окон и difflib —
     это заметная часть боевых адресов и главный резерв скорости пакета.
     """
-    query = fold_kazakh(" ".join(token.norm for token in name_tokens))
+    query = fold_kazakh(normalize(" ".join(token.norm for token in name_tokens)))
     best: _EntityMatch | None = None
     start = name_tokens[0].start
     end = name_tokens[-1].end
@@ -559,6 +577,11 @@ def _match_entity(
     регионами/городом (чтобы не приписать случайную область).
     """
     if not name_tokens or not candidates:
+        return None
+    candidates = [
+        candidate for candidate in candidates if not _is_generic_type_name(candidate)
+    ]
+    if not candidates:
         return None
     exact = _exact_match(name_tokens, candidates)
     if exact is not None:
@@ -605,7 +628,7 @@ def _has_unlinked_leading_candidate(
         return False
 
     first = name_tokens[0]
-    first_norm = fold_kazakh(first.norm)
+    first_norm = fold_kazakh(normalize(first.norm))
     for candidate in candidates:
         if candidate.city_id is not None or candidate.id == best.entity.id:
             continue
@@ -891,15 +914,14 @@ class AddressParserService:
         # 5. Запрос в БД по остатку строки.
         #    Казахские токены НЕ отсекаются: "Мәңгілік Ел", "Қабанбай батыр"
         #    должны попадать в FTS как есть (иначе от названия остаётся "Ел").
+        # Базовое слово типа («мкр», «улица», «микрорайон») — не часть
+        # названия. Иначе exact-матчинг цепляется за мусорную сущность «МКР»
+        # вместо «Орбита-1», а FTS-запрос сужается до одного типа.
         query_tokens = [
-            token.norm
-            for position, token in phrase
-            if position not in type_positions or type_positions[position] in LIVING_AREA_TYPES
+            token.norm for position, token in phrase if position not in type_positions
         ]
         name_tokens = [
-            token
-            for position, token in phrase
-            if position not in type_positions or type_positions[position] in LIVING_AREA_TYPES
+            token for position, token in phrase if position not in type_positions
         ] or [token for _, token in phrase]
         name_span = (name_tokens[0].start, name_tokens[-1].end)
 
@@ -1160,9 +1182,13 @@ class AddressParserService:
             # Берём больше кандидатов, чтобы не потерять одноимённые улицы
             # в других городах и корректно определить неоднозначность.
             search_limit = 32 if level == "none" else 8
-            found = repository.search_streets(
-                query_tokens, limit=search_limit, **filters  # type: ignore[arg-type]
-            )
+            found = [
+                entity
+                for entity in repository.search_streets(
+                    query_tokens, limit=search_limit, **filters  # type: ignore[arg-type]
+                )
+                if not _is_generic_type_name(entity)
+            ]
             if not found:
                 continue
             matched_pool = found
