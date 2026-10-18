@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from app.core.text import fold_kazakh, normalize, tokenize
+from app.core.vocabulary import canonical_street_type
 
 logger = logging.getLogger(__name__)
 
@@ -265,19 +266,43 @@ class NullAddressRepository:
 _FTS_SAFE_RE = re.compile(r"[0-9a-zа-яёәғқңөұүһі]+")
 
 
+def _strip_street_type(value: str) -> str:
+    """Убрать базовое слово типа: «аксай 3а микрорайон» -> «аксай 3а»."""
+    tokens = value.split()
+    core = [token for token in tokens if canonical_street_type(token) is None]
+    return " ".join(core) if core else value
+
+
+def _folded_name_variants(value: str) -> set[str]:
+    normalized = normalize(value or "")
+    if not normalized:
+        return set()
+    return {
+        folded
+        for folded in (
+            fold_kazakh(normalized),
+            fold_kazakh(_strip_street_type(normalized)),
+        )
+        if folded
+    }
+
+
 def _street_name_keys(entity: StreetEntity) -> set[str]:
-    """Варианты названия улицы, свёрнутые для сравнения без казахских букв."""
-    values = (
+    """Варианты названия улицы, свёрнутые для сравнения без казахских букв.
+
+    Кроме полного имени и ядра добавляем вариант без типа: в БД встречаются
+    и «Аксай-3А», и «Аксай-3А микрорайон». Без этого фильтр resolve_streets
+    терял дубли с типом в name_norm/name_core_norm.
+    """
+    keys: set[str] = set()
+    for value in (
         entity.name_norm,
         entity.name_core_norm,
         entity.name_official,
         *entity.aliases,
-    )
-    return {
-        folded
-        for folded in (fold_kazakh(normalize(value or "")) for value in values)
-        if folded
-    }
+    ):
+        keys |= _folded_name_variants(str(value or ""))
+    return keys
 
 
 def _street_matches_query(
@@ -289,14 +314,9 @@ def _street_matches_query(
     у дублей одна и та же улица может называться «Тұран даңғылы»,
     «проспект Туран» или «Turan Avenue».
     """
-    targets = {
-        folded
-        for folded in (
-            fold_kazakh(normalize(core_norm or "")),
-            fold_kazakh(normalize(name_norm or "")),
-        )
-        if folded
-    }
+    targets: set[str] = set()
+    for value in (core_norm, name_norm):
+        targets |= _folded_name_variants(str(value or ""))
     return bool(targets & _street_name_keys(entity))
 
 

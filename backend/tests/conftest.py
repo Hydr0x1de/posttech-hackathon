@@ -73,6 +73,30 @@ def turan_db(demo_db: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
                     " ".join([name_norm, core_norm, *alias_norm]),
                 ),
             )
+        # Дубль, у которого тип остался в name_norm/name_core_norm:
+        # «Аксай-3А микрорайон». Дом 56 привязан именно к нему.
+        conn.execute(
+            """INSERT INTO streets_and_areas
+               (id, city_id, district_id, province_id, entity_type, street_type,
+                name_official, name_norm, name_core_norm, aliases)
+               VALUES (5001, 2, 5, 2, 'living_area', 'микрорайон',
+                       'Аксай-3А микрорайон', 'аксай 3а микрорайон',
+                       'аксай 3а микрорайон', '[]')""",
+        )
+        conn.execute(
+            """INSERT INTO fts_address
+               (entity_id, entity_type, city_id, district_id, province_id,
+                street_type, name_official, search_text)
+               VALUES ('5001', 'living_area', 2, 5, 2, 'микрорайон',
+                       'Аксай-3А микрорайон', 'аксай 3а микрорайон')""",
+        )
+        conn.execute(
+            """INSERT INTO houses
+               (street_id, city_id, district_id, province_id, housenumber,
+                housenumber_norm, lat, lon, place_id)
+               VALUES (5001, 2, 5, 2, '56', '56', ?, ?, NULL)""",
+            (43.2351075, 76.8273989),
+        )
         conn.execute(
             """INSERT INTO houses
                (street_id, city_id, district_id, province_id, housenumber,

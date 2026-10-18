@@ -112,6 +112,14 @@ def test_resolve_streets_finds_kazakh_duplicate(turan_db):
     repo.close()
 
 
+def test_resolve_streets_ignores_street_type_in_name(turan_db):
+    """Дубль «Аксай-3А микрорайон» находится по запросу «аксай 3а»."""
+    repo = SQLiteAddressRepository(turan_db)
+    found = repo.resolve_streets("аксай 3а", "аксай 3а", city_id=2)
+    assert 5001 in {entity.id for entity in found}
+    repo.close()
+
+
 def test_resolve_streets_finds_kazakh_duplicate_without_fts(tmp_path, turan_db):
     """Без FTS широкий скан по городу всё равно находит оба дубля."""
     raw = tmp_path / "turan_no_fts.db"

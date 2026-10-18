@@ -206,6 +206,20 @@ def test_turan_duplicate_falls_back_to_street_when_house_missing(turan_client):
     assert payload["lon"] is not None
 
 
+def test_house_found_in_duplicate_with_type_in_name(turan_client):
+    """«Аксай-3А микрорайон» должен находить дом, привязанный к этому дублю.
+
+    У сущности тип остался в name_norm/name_core_norm, поэтому сравнение
+    обязано срезать базовое слово перед поиском дома.
+    """
+    payload = _geocode(
+        turan_client, city="Астана", street_name="Аксай 3а", house="56"
+    )
+    assert payload["precision"] == "house"
+    assert payload["lat"] == pytest.approx(43.2351075)
+    assert payload["lon"] == pytest.approx(76.8273989)
+
+
 def test_ambiguous_street_without_city_returns_nulls(client):
     """Без города одинаковую улицу в разных городах угадывать нельзя."""
     payload = _geocode(client, street_name="Кабанбай батыра", house="10")

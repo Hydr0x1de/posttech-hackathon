@@ -139,12 +139,21 @@ class _HouseMatch:
 
 
 def _street_names(entity: StreetEntity) -> set[str]:
-    names = {
-        fold_kazakh(normalize(value))
-        for value in (entity.name_norm, entity.name_core_norm, *entity.names)
-        if value
-    }
-    names.discard("")
+    """Варианты названия с учётом казахских букв и типа в имени.
+
+    В БД есть дубли вида «Аксай-3А» и «Аксай-3А микрорайон». Для геокодера
+    они должны быть одним названием, иначе дом ищется только у первого
+    кандидата, а второй (где может лежать нужный house) теряется.
+    """
+    names: set[str] = set()
+    for value in (entity.name_norm, entity.name_core_norm, *entity.names):
+        normalized = normalize(value or "")
+        if not normalized:
+            continue
+        names.add(fold_kazakh(normalized))
+        core = core_street_name(normalized)
+        if core:
+            names.add(fold_kazakh(core))
     return names
 
 
